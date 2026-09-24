@@ -1,6 +1,6 @@
 # Environment and retirement
 
-The original deployment environment is not carried into this public repository. Old environment files, deployment workflows and replaced documentation are backed up under the source project's ignored local/publication-backup directory. The public repository begins with fresh Git history and a configuration template only.
+The original deployment environment is not carried into this public repository. Old environment files, deployment workflows and replaced documentation are backed up under the source project's ignored local/publication-backup-2026-09-24 directory. The public repository begins with fresh Git history and a configuration template only.
 
 No old GitHub Actions deployment secrets or environments are imported. No automatic deployment pipeline runs on push. Configure new service accounts/keys for a new installation; never reuse a classroom service-role key. Private source documents, grading credentials, SSH material and database snapshots are excluded.
 

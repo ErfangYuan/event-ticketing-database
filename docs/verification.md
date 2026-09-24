@@ -11,4 +11,4 @@ This is execution coverage, not proof of complete business correctness. Follow-u
 - Verify concurrent booking, cancellation and resale invariants using isolated transactional fixtures.
 - Replace demonstration password handling and payment-card records before any real service deployment.
 
-These are repository follow-up notes, not visitor-facing portfolio copy. The Maven distribution launcher needs a clean-machine dependency/model download check before publication; the original dependency set was used for the recorded runs.
+These are repository follow-up notes, not visitor-facing portfolio copy. The Maven distribution launcher still needs a clean-machine dependency/model download check, tracked in GitHub issue #4; the original dependency set was used for the recorded runs. This source publication does not claim that check passed.
