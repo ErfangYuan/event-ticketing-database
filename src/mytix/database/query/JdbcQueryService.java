@@ -12,7 +12,8 @@ import mytix.database.DatabaseLogistics;
 
 public final class JdbcQueryService implements QueryService {
 
-    private static final String UPCOMING = " p.status = 'SCHEDULED' AND p.date >= CURDATE() ";
+    private static final String UPCOMING =
+            " p.status = 'SCHEDULED' AND TIMESTAMP(p.date, p.startTime) > CURRENT_TIMESTAMP ";
 
     
     private static final String SECTION_AVAIL_CTE =
@@ -65,15 +66,20 @@ public final class JdbcQueryService implements QueryService {
 
     @Override
     public List<List<String>> q1Vicinity(double lat, double lng, double radiusKm, String rankBy) {
+        if (!Double.isFinite(lat) || lat < -90 || lat > 90
+                || !Double.isFinite(lng) || lng < -180 || lng > 180
+                || !Double.isFinite(radiusKm) || radiusKm < 0) {
+            throw new IllegalStateException("Latitude, longitude and distance must be finite and in range.");
+        }
         String sql =
                 "WITH " + SECTION_AVAIL_CTE + ", " + PERF_CHEAPEST_CTE + " "
                         + """
                         SELECT p.performanceID, e.title, v.venueName, pa.city,
-                               (2 * 6371 * ASIN(SQRT(
+                               (2 * 6371.0088 * ASIN(SQRT(LEAST(1.0, GREATEST(0.0,
                                   POWER(SIN(RADIANS(v.latitude - ?) / 2), 2)
                                   + COS(RADIANS(?)) * COS(RADIANS(v.latitude))
                                     * POWER(SIN(RADIANS(v.longitude - ?) / 2), 2)
-                                ))) AS distanceKm,
+                                ))))) AS distanceKm,
                                pc.cheapestPrice
                         FROM performances p
                         JOIN events e ON e.eventID = p.eventID
@@ -111,9 +117,9 @@ public final class JdbcQueryService implements QueryService {
     private static String orderByFor(String rankBy) {
         String key = rankBy == null ? "" : rankBy.trim().toLowerCase();
         return switch (key) {
-            case "price_asc" -> "pc.cheapestPrice ASC";
-            case "price_desc" -> "pc.cheapestPrice DESC";
-            default -> "distanceKm ASC";
+            case "price_asc" -> "pc.cheapestPrice IS NULL, pc.cheapestPrice ASC, distanceKm, p.performanceID";
+            case "price_desc" -> "pc.cheapestPrice IS NULL, pc.cheapestPrice DESC, distanceKm, p.performanceID";
+            default -> "distanceKm ASC, p.performanceID";
         };
     }
 
@@ -121,6 +127,7 @@ public final class JdbcQueryService implements QueryService {
 
     @Override
     public List<List<String>> q2PostalAdjacent(String postalCode) {
+        requireText(postalCode, "Postal code");
         String sql =
                 """
                 SELECT p.performanceID, e.title, v.venueName, pa.city, pa.postalCode
@@ -154,6 +161,7 @@ public final class JdbcQueryService implements QueryService {
 
     @Override
     public List<List<String>> q3ExactAddress(String address) {
+        requireText(address, "Address");
         String sql =
                 """
                 SELECT v.venueID, v.venueName, v.address, p.performanceID, e.title, p.date, p.startTime
@@ -187,6 +195,8 @@ public final class JdbcQueryService implements QueryService {
 
     @Override
     public List<List<String>> q4TemporalAvailability(LocalDate from, LocalDate to, int minAvailable) {
+        validateDates(from, to, true);
+        requireNonnegative(minAvailable, "Minimum available tickets");
         String sql =
                 "WITH " + SECTION_AVAIL_CTE + ", " + PERF_AVAIL_CTE + " "
                         + """
@@ -197,10 +207,10 @@ public final class JdbcQueryService implements QueryService {
                         JOIN venues v ON v.venueID = p.venueID
                         JOIN postal_areas pa ON pa.postalCode = v.postalCode
                         LEFT JOIN perf_avail pa2 ON pa2.performanceID = p.performanceID
-                        WHERE p.status <> 'CANCELLED'
+                        WHERE """ + UPCOMING + """
                           AND p.date BETWEEN ? AND ?
                         HAVING available >= ?
-                        ORDER BY p.date, p.startTime
+                        ORDER BY p.date, p.startTime, p.performanceID
                         """;
         try (Connection c = DatabaseLogistics.getConnection();
                 PreparedStatement ps = c.prepareStatement(sql)) {
@@ -226,19 +236,47 @@ public final class JdbcQueryService implements QueryService {
 
     @Override
     public List<List<String>> q5Combined(Q5Filter filter) {
+        if (filter == null) {
+            throw new IllegalStateException("Search filters are required.");
+        }
+        validateDates(filter.dateFrom(), filter.dateTo(), false);
+        validateMoney(filter.minPrice(), "Minimum price");
+        validateMoney(filter.maxPrice(), "Maximum price");
+        if (filter.minPrice() != null && filter.maxPrice() != null
+                && filter.minPrice().compareTo(filter.maxPrice()) > 0) {
+            throw new IllegalStateException("Minimum price must not exceed maximum price.");
+        }
+        if (filter.minAvailable() != null) {
+            requireNonnegative(filter.minAvailable(), "Minimum available tickets");
+        }
+        if (filter.sectionType() != null && !filter.sectionType().isBlank()
+                && !filter.reservedOnly() && !filter.gaOnly()) {
+            throw new IllegalStateException("Section type must be RESERVED or GA.");
+        }
+        String sectionPredicate = filter.reservedOnly() ? "sa.isGeneralAdmission = 0"
+                : filter.gaOnly() ? "sa.isGeneralAdmission = 1" : "1 = 1";
+        String matchingInventory = """
+                matching_inventory AS (
+                  SELECT sa.performanceID, SUM(sa.available) AS available,
+                         MIN(CASE WHEN sa.available > 0 THEN pt.price END) AS cheapestPrice
+                  FROM section_avail sa
+                  JOIN price_tiers pt ON pt.tierID = sa.tierID AND pt.performanceID = sa.performanceID
+                  WHERE %s
+                  GROUP BY sa.performanceID
+                )
+                """.formatted(sectionPredicate);
         StringBuilder sql = new StringBuilder(
-                "WITH " + SECTION_AVAIL_CTE + ", " + PERF_AVAIL_CTE + ", " + PERF_CHEAPEST_CTE + " "
+                "WITH " + SECTION_AVAIL_CTE + ", " + matchingInventory + " "
                         + """
                         SELECT p.performanceID, e.title, g.genreName, sg.segmentName, v.venueName, pa.city,
-                               p.date, COALESCE(pa2.available, 0) AS available, pc.cheapestPrice
+                               p.date, COALESCE(mi.available, 0) AS available, mi.cheapestPrice
                         FROM performances p
                         JOIN events e ON e.eventID = p.eventID
                         JOIN genres g ON g.genreID = e.genreID
                         JOIN segments sg ON sg.segmentID = g.segmentID
                         JOIN venues v ON v.venueID = p.venueID
                         JOIN postal_areas pa ON pa.postalCode = v.postalCode
-                        LEFT JOIN perf_avail pa2 ON pa2.performanceID = p.performanceID
-                        LEFT JOIN perf_cheapest pc ON pc.performanceID = p.performanceID
+                        LEFT JOIN matching_inventory mi ON mi.performanceID = p.performanceID
                         """);
         List<Object> params = new ArrayList<>();
         sql.append("WHERE ").append(UPCOMING).append(' ');
@@ -263,14 +301,8 @@ public final class JdbcQueryService implements QueryService {
             sql.append("AND p.date <= ? ");
             params.add(filter.dateTo());
         }
-        if (filter.reservedOnly()) {
-            sql.append(
-                    "AND EXISTS (SELECT 1 FROM section_avail sa JOIN sections sec ON sec.sectionID = sa.sectionID "
-                            + "WHERE sa.performanceID = p.performanceID AND sec.isGeneralAdmission = 0 AND sa.available > 0) ");
-        } else if (filter.gaOnly()) {
-            sql.append(
-                    "AND EXISTS (SELECT 1 FROM section_avail sa JOIN sections sec ON sec.sectionID = sa.sectionID "
-                            + "WHERE sa.performanceID = p.performanceID AND sec.isGeneralAdmission = 1 AND sa.available > 0) ");
+        if (filter.reservedOnly() || filter.gaOnly()) {
+            sql.append("AND mi.performanceID IS NOT NULL ");
         }
 
         List<String> having = new ArrayList<>();
@@ -279,17 +311,17 @@ public final class JdbcQueryService implements QueryService {
             params.add(filter.minAvailable());
         }
         if (filter.minPrice() != null) {
-            having.add("(pc.cheapestPrice IS NULL OR pc.cheapestPrice >= ?)");
+            having.add("mi.cheapestPrice >= ?");
             params.add(filter.minPrice());
         }
         if (filter.maxPrice() != null) {
-            having.add("(pc.cheapestPrice IS NULL OR pc.cheapestPrice <= ?)");
+            having.add("mi.cheapestPrice <= ?");
             params.add(filter.maxPrice());
         }
         if (!having.isEmpty()) {
             sql.append("HAVING ").append(String.join(" AND ", having)).append(' ');
         }
-        sql.append("ORDER BY p.date, p.startTime");
+        sql.append("ORDER BY p.date, p.startTime, p.performanceID");
 
         try (Connection c = DatabaseLogistics.getConnection();
                 PreparedStatement ps = c.prepareStatement(sql.toString())) {
@@ -315,6 +347,7 @@ public final class JdbcQueryService implements QueryService {
 
     @Override
     public List<List<String>> q6SeatMapSummary(int performanceID) {
+        requirePositive(performanceID, "Performance ID");
         String sql =
                 """
                 SELECT sec.sectionID, sec.sectionName, sec.isGeneralAdmission, pt.tierName, pt.price,
@@ -359,7 +392,7 @@ public final class JdbcQueryService implements QueryService {
                                 fmtMoney(rs.getBigDecimal("price")),
                                 String.valueOf(Math.max(available, 0)),
                                 String.valueOf(sold),
-                                rs.getBoolean("isGeneralAdmission") ? "n/a" : String.valueOf(blocked));
+                                String.valueOf(blocked));
                     });
         } catch (SQLException e) {
             throw new IllegalStateException("q6SeatMapSummary failed: " + e.getMessage(), e);
@@ -370,7 +403,10 @@ public final class JdbcQueryService implements QueryService {
 
     @Override
     public List<List<String>> q7BestConsecutive(int performanceID, int quantity, BigDecimal budgetOrNull) {
-        int offset = Math.max(quantity - 1, 0);
+        requirePositive(performanceID, "Performance ID");
+        requirePositive(quantity, "Consecutive ticket quantity");
+        validateMoney(budgetOrNull, "Budget");
+        int offset = quantity - 1;
         StringBuilder sql = new StringBuilder(
                 """
                 WITH avail AS (
@@ -379,8 +415,10 @@ public final class JdbcQueryService implements QueryService {
                   JOIN sections sec ON sec.sectionID = se.sectionID
                   JOIN performance_section_tiers pst
                     ON pst.sectionID = se.sectionID AND pst.performanceID = ?
-                  JOIN price_tiers pt ON pt.tierID = pst.tierID
-                  WHERE sec.isGeneralAdmission = 0
+                  JOIN performances p ON p.performanceID = pst.performanceID AND p.venueID = sec.venueID
+                  JOIN price_tiers pt ON pt.tierID = pst.tierID AND pt.performanceID = p.performanceID
+                  WHERE """ + UPCOMING + """
+                    AND sec.isGeneralAdmission = 0
                     AND se.seatID NOT IN (
                       SELECT seatID FROM blocked_seats WHERE performanceID = ?
                     )
@@ -416,7 +454,9 @@ public final class JdbcQueryService implements QueryService {
             sql.append("WHERE totalPrice <= ? ");
             params.add(budgetOrNull);
         }
-        sql.append("ORDER BY totalPrice ASC LIMIT 1");
+        sql.append(budgetOrNull == null ? "WHERE " : "AND ");
+        sql.append("totalPrice = (SELECT MIN(totalPrice) FROM priced) ");
+        sql.append("ORDER BY sectionID, rowName, startSeat");
 
         try (Connection c = DatabaseLogistics.getConnection();
                 PreparedStatement ps = c.prepareStatement(sql.toString())) {
@@ -460,5 +500,36 @@ public final class JdbcQueryService implements QueryService {
     private static String fmtMoneyOrNa(ResultSet rs, String col) throws SQLException {
         BigDecimal v = rs.getBigDecimal(col);
         return rs.wasNull() || v == null ? "n/a" : fmtMoney(v);
+    }
+
+    private static void validateDates(LocalDate from, LocalDate to, boolean required) {
+        if ((required && (from == null || to == null))
+                || (from != null && to != null && from.isAfter(to))) {
+            throw new IllegalStateException("Date range must have a start no later than its end.");
+        }
+    }
+
+    private static void validateMoney(BigDecimal value, String label) {
+        if (value != null && (value.signum() < 0 || value.stripTrailingZeros().scale() > 2)) {
+            throw new IllegalStateException(label + " must be nonnegative with at most two decimal places.");
+        }
+    }
+
+    private static void requireNonnegative(int value, String label) {
+        if (value < 0) {
+            throw new IllegalStateException(label + " must be nonnegative.");
+        }
+    }
+
+    private static void requirePositive(int value, String label) {
+        if (value <= 0) {
+            throw new IllegalStateException(label + " must be positive.");
+        }
+    }
+
+    private static void requireText(String value, String label) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException(label + " is required.");
+        }
     }
 }
