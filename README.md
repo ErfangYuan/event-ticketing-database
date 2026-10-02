@@ -20,11 +20,26 @@ Designed and implemented by Erfang Yuan. This is a portfolio copy with fresh his
 
 ## Run locally
 
-Install JDK 17+, Maven and MySQL 8 (or a compatible server). Create a **new** database such as mytix_demo and a dedicated local database user; grant it access only to that database. In the MySQL client, explicitly select that new database before loading sql/schema.sql and then sql/load.sql. Never load these scripts into a database you want to preserve. The optional drop.sql is destructive.
+Install JDK 17+ and MySQL 8 (or a compatible server). A separate Maven installation is unnecessary: the checked-in [Apache Maven Wrapper](https://maven.apache.org/tools/wrapper/) downloads Maven 3.10.0 and checks its pinned SHA-256 checksum. The first build needs internet access. Set `JAVA_HOME` to the JDK directory that contains `bin/java` and `bin/javac` (on Windows, `java.exe` and `javac.exe`), not a parent such as `C:\Program Files\Java`. Ensure Java is on `PATH` when `JAVA_HOME` is unset.
+
+Verify the build without connecting to MySQL:
+
+```powershell
+# Windows; replace the path with your installed JDK.
+$env:JAVA_HOME='C:\Program Files\Java\jdk-24'
+.\mvnw.cmd -B -ntp clean compile dependency:copy-dependencies
+```
+
+```bash
+# Linux/macOS; JAVA_HOME may be omitted when the JDK is on PATH.
+sh ./mvnw -B -ntp clean compile dependency:copy-dependencies
+```
+
+Create a **new** database such as mytix_demo and a dedicated local database user; grant it access only to that database. In the MySQL client, explicitly select that new database before loading sql/schema.sql and then sql/load.sql. Never load these scripts into a database you want to preserve. The optional drop.sql is destructive.
 
 Configure MYTIX_DB_HOST, MYTIX_DB_PORT, MYTIX_DB_NAME and MYTIX_DB_USER in your shell. For example, PowerShell uses `$env:MYTIX_DB_NAME='mytix_demo'`; Bash uses `export MYTIX_DB_NAME=mytix_demo`. The application reads process environment variables, **not .env files automatically**. .env.example is a list of names, not a loader.
 
-Run `./run.ps1` on Windows or `bash run.sh` on Linux/macOS. The launcher asks for the MySQL password using masked local input if it is not already set. Passwords are not command-line arguments. Maven downloads JDBC 8.0.29 and OpenNLP 1.9.4 and compiles the program. Configure your own database; an empty password is not a deployment assumption.
+Run `./run.ps1` on Windows or `bash run.sh` on Linux/macOS. The launcher builds through the wrapper, then asks for the MySQL password using masked local input if it is not already set. Passwords are not command-line arguments. Maven downloads JDBC 8.0.29 and OpenNLP 1.9.4 and compiles the program for Java 17. Configure your own database; an empty password is not a deployment assumption.
 
 R9 additionally needs compatible English OpenNLP models: en-sent.bin, en-token.bin, en-pos-maxent.bin and en-chunker.bin in src/lib/opennlp/. Models and third-party binaries are not bundled in this copy. Obtain compatible models from the Apache OpenNLP distribution, review their licenses and preserve the required names. Other searches and reports can run independently.
 
