@@ -1,63 +1,88 @@
 # Event Ticketing Database (MyTix)
 
-![Real project demonstration](docs/media/schema.svg)
+[Web/API guide](docs/web-api.md) · [Domain contract](docs/domain-contract.md) · [Verification](docs/verification.md) · [Issues](https://github.com/ErfangYuan/event-ticketing-database/issues)
 
-[Documentation](wiki/Home.md) · [GitHub Wiki](https://github.com/ErfangYuan/event-ticketing-database/wiki) · [Known issues and roadmap](https://github.com/ErfangYuan/event-ticketing-database/issues)
+A Java/MySQL ticketing application with a Next.js workspace and the original terminal interface. Discover shows, book and resell tickets, manage performances, explore every database relationship, and inspect the reports behind the activity.
 
+Designed and implemented by Erfang Yuan. This portfolio repository contains synthetic demonstration records, not course reports, grades, credentials or private database snapshots.
 
-A Java terminal application for discovering events, checking inventory and following a ticket from purchase through ownership changes. The interesting part is keeping the data consistent when a seat is sold, a show is cancelled or a ticket is resold.
+## Explore the workspace
 
-Designed and implemented by Erfang Yuan. This is a portfolio copy with fresh history; it does not include course reports, grades, real credentials or private database snapshots.
+- An interactive graph of **22 tables and 39 foreign-key relationships**, with entity details and navigation to related records.
+- Complete tables, indexed cursor pagination, account-scoped personal data, CSV export and interactive charts.
+- All **7 searches and 9 reports**, including every geographic, ranking and aggregation mode.
+- Customer booking, cancellation, resale and reviews; organizer event creation, performance scheduling, tier pricing, seat holds and cancellation.
+- Local customer/organizer accounts, salted passwords, simulated payments, reference-data creation/deletion and one-click demo generation or clear-all.
 
-## What is here
+## Start locally
 
-- A normalized 22-table MySQL schema, freshly generated synthetic demonstration records and a Java/JDBC terminal interface.
-- Customer and organizer workflows for bookings, inventory, cancellation, resale and reviews.
-- Seven search views, including nearby events, filtered availability and consecutive seats within a budget.
-- Nine reports covering revenue, organizer/customer activity, cancellations, sell-through, resale and review noun phrases.
+Install **JDK 17+**, **Node.js 22+ with npm**, and **MySQL 8+**. The lockfile pins Next.js 16.3.8 and React 19.3.0. The checked-in [Maven Wrapper](https://maven.apache.org/tools/wrapper/) downloads checksum-pinned Maven 3.10.0; no global Maven installation is needed. Initial dependency/model downloads require internet access.
 
-The current schema includes explicit postal adjacency and review noun-phrase occurrences. [Domain contract](docs/domain-contract.md) · [Fresh demonstration data](docs/demo-data.md).
-
-## Run locally
-
-Install JDK 17+ and MySQL 8 (or a compatible server). A separate Maven installation is unnecessary: the checked-in [Apache Maven Wrapper](https://maven.apache.org/tools/wrapper/) downloads Maven 3.10.0 and checks its pinned SHA-256 checksum. The first build needs internet access. Set `JAVA_HOME` to the JDK directory that contains `bin/java` and `bin/javac` (on Windows, `java.exe` and `javac.exe`), not a parent such as `C:\Program Files\Java`. Ensure Java is on `PATH` when `JAVA_HOME` is unset.
-
-Verify the build without connecting to MySQL:
+1. Create a dedicated empty database and local user, granting access only to that database. Install `sql/schema.sql` in the explicitly selected database. An older 20-table installation needs a fresh schema; startup does not migrate or clear it.
+2. Configure the database environment variables below. The launchers prompt for the MySQL password with masked local input. They do not automatically read `.env` files.
+3. From the repository root, run `java scripts/InstallNlpModels.java` to install the four pinned English models needed for new reviews and demo generation. Custom model directories and offline setup are described in [model setup](docs/opennlp-models.md).
+4. Run the launcher for your platform. Open **http://127.0.0.1:3000** and select **Demo controls → Generate fresh demo**.
 
 ```powershell
-# Windows; replace the path with your installed JDK.
+# Windows PowerShell, from the repository root. Use your installed JDK.
 $env:JAVA_HOME='C:\Program Files\Java\jdk-24'
-.\mvnw.cmd -B -ntp clean compile dependency:copy-dependencies
+$env:MYTIX_DB_HOST='127.0.0.1'
+$env:MYTIX_DB_PORT='3306'
+$env:MYTIX_DB_NAME='mytix_demo'
+$env:MYTIX_DB_USER='mytix_app'
+.\run-web.ps1
 ```
 
 ```bash
-# Linux/macOS; JAVA_HOME may be omitted when the JDK is on PATH.
-sh ./mvnw -B -ntp clean compile dependency:copy-dependencies
+# Linux/macOS, from the repository root
+export MYTIX_DB_HOST=127.0.0.1 MYTIX_DB_PORT=3306
+export MYTIX_DB_NAME=mytix_demo MYTIX_DB_USER=mytix_app
+bash run-web.sh
 ```
 
-Create a **new** database such as mytix_demo and a dedicated local database user; grant it access only to that database. Explicitly select that database when running `sql/schema.sql` and then `sql/load.sql` using the MySQL batch client without `--force`. The loader replaces all project data. The optional `drop.sql` removes the project tables. See [load/clear commands, generated data and public synthetic logins](docs/demo-data.md).
+For example, after creating `mytix_demo`, a Windows PowerShell session can install its schema through the MySQL batch client:
 
-Configure MYTIX_DB_HOST, MYTIX_DB_PORT, MYTIX_DB_NAME and MYTIX_DB_USER in your shell. For example, PowerShell uses `$env:MYTIX_DB_NAME='mytix_demo'`; Bash uses `export MYTIX_DB_NAME=mytix_demo`. The application reads process environment variables, **not .env files automatically**. .env.example is a list of names, not a loader.
+```powershell
+cmd /c 'mysql -h 127.0.0.1 -u mytix_app -p mytix_demo < sql/schema.sql'
+```
 
-Run `./run.ps1` on Windows or `bash run.sh` on Linux/macOS. The launcher builds through the wrapper, then asks for the MySQL password using masked local input if it is not already set. Passwords are not command-line arguments. Maven downloads JDBC 8.0.29 and OpenNLP 1.9.4 and compiles the program for Java 17. Configure your own database; an empty password is not a deployment assumption.
+On Bash, use the same `mysql` command with ordinary input redirection. The client prompts for the database password. The optional `sql/load.sql` can be loaded the same way **without `--force`**; it replaces all project records with the same new demonstration model. See [dataset and maintenance details](docs/demo-data.md).
 
-Creating reviews or loading their noun-phrase projections needs four compatible English OpenNLP models. From the repository root, run `java scripts/InstallNlpModels.java` with JDK 17+ to download the pinned models into ignored `src/lib/opennlp/` and verify their SHA-256 checksums. Repeat the command to verify or repair the installation. See [model setup, sources, and licenses](docs/opennlp-models.md) for custom directories and offline preparation. Review text and extracted phrase occurrences are saved in one transaction; missing models abort that write. R9 reads the stored occurrences and performs frequency aggregation and top-ten ranking in SQL, so report reads need no model files and do not change data.
+The launchers compile Java, install locked npm dependencies, build Next.js, generate a private API key when absent, and start both services on loopback. **Ctrl+C stops the services.** Windows development mode is `./run-web.ps1 -Dev`; `-SkipBuild` reuses an existing build, and `-Check` verifies startup then stops both services. Both interfaces use the same database: stop other writers during maintenance.
 
-See [account security and input behavior](docs/account-security.md) for salted password storage, legacy-account migration, password whitespace, interrupted commands and account deletion.
+The API/Web ports default to 8081/3000. Override `MYTIX_API_PORT`, `MYTIX_WEB_PORT` and `MYTIX_WEB_ORIGIN` when needed. The Node server receives the project API key, not the database environment variables. [Configuration and security](docs/web-api.md).
 
-## A short tour
+The isolated local demo enables load/clear controls for visitors. Set `MYTIX_DEMO_MODE=false` to disable them. Both actions replace or delete **all project data** and invalidate every session. No payment processor or external identity provider is connected.
 
-1. Run the demo loader and use its `futureConsecutiveAndGA` performance ID in Queries → Q6 to compare available, sold and blocked inventory.
-2. Try Q7 for that performance with quantity 2 and a budget to find consecutive reserved seats.
-3. Q1 near latitude 43.6426 / longitude -79.3871 finds demonstration venues around Toronto.
-4. Reports → R1, city mode, over the preceding year compares revenue. Dates are generated relative to the UTC loading date.
+| Demo account | Email | Password |
+| --- | --- | --- |
+| Customer | `customer003@demo.mytix.test` | `MyTixDemo!42` |
+| Organizer | `organizer01@demo.mytix.test` | `MyTixDemo!42` |
 
-Sample names, cards and event records are synthetic. No payment processor is connected; this is a database/transaction study, not a production payment application. See [local verification and follow-up work](docs/verification.md).
+The fresh dataset contains 24 events, 72 performances, 645 orders and 1,903 tickets across Toronto, Vancouver, New York and Seattle. All accounts and transactions are synthetic; dates are relative to the UTC loading day. Do not use real account or payment information.
 
-## Earlier interface illustrations
+## Build or use the terminal
 
-![Seat availability](docs/media/q6.png)
+Set `JAVA_HOME` to the actual JDK directory containing `bin/java` and `bin/javac` (or their Windows `.exe` versions). Alternatively, put the JDK on `PATH` with `JAVA_HOME` unset.
 
-![Consecutive seats](docs/media/q7.png)
+```powershell
+.\mvnw.cmd -B -ntp compile dependency:copy-dependencies
+.\run.ps1
+```
 
-These illustrations preserve output from the earlier dataset and are not acceptance evidence for the current model. Current validation is described in [verification](docs/verification.md).
+```bash
+sh ./mvnw -B -ntp compile dependency:copy-dependencies
+bash run.sh
+```
+
+Build commands need no database connection. The TUI launcher uses the same `MYTIX_DB_*` configuration and prompts for the password if absent. Java dependencies are Connector/J 8.0.29, OpenNLP 1.9.4 and Jackson 2.22.3; compilation targets Java 17. SQL R9 reads persisted noun-phrase occurrences and needs no model files at report time.
+
+## Try a few paths
+
+- Queries → Nearby events: latitude 43.6426, longitude -79.3871, radius 15 km.
+- Events & tickets → Available seats / Section inventory: performance 5 in the fresh demo. Select actual seat or section IDs before booking.
+- Reports → Sales revenue: compare cities over the preceding year. Switch the chart metric or inspect every result row.
+- Schema explorer: click any entity or relationship to browse its records; use keyboard selection to inspect a node's columns.
+- Data browser: sign in as an organizer to add/remove unreferenced catalog data. Transaction history changes through the dedicated booking/cancellation workflows.
+
+[Verification results and platform limits](docs/verification.md) · [Account lifecycle](docs/account-security.md) · [Pricing toolkit](docs/pricing-toolkit.md)

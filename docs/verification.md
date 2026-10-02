@@ -1,6 +1,6 @@
 # Verification, 2026-10-02
 
-The current database/TUI audit was rebuilt from the original requirements and public terminal entrypoints. Previous seeds, screenshots and results were not acceptance oracles. Newly written tests, private requirements, credentials and detailed transcripts remain in ignored `local/` and are not distributed. These are observed local results, not a claim of automated CI coverage.
+The database/TUI audit was rebuilt from the original requirements and public terminal entrypoints, then extended through the Java API and Next.js browser application. Previous seeds, screenshots and results were not acceptance oracles. Newly written tests, private requirements, credentials and detailed transcripts remain in ignored `local/` and are not distributed. These are observed local results, not a claim of automated CI coverage.
 
 ## Database and terminal phase
 
@@ -30,6 +30,23 @@ Verified locally on Windows with JDK 24 compiling for Java 17, MySQL 26.7.0, Mav
 
 The schema targets MySQL 8 features; this run is not a claim of execution on every MySQL 8 patch or operating system. SQL loading must use batch mode without `--force`; stop other writers for CLI/SQL maintenance. No payment processor or external identity provider is connected.
 
-## Remaining delivery gate
+## Java API and Next.js phase
 
-The Java API and Next.js GUI, their integration/security/browser acceptance, final run instructions, publication and Issue closure are the next phase. Database-stage completion does not imply those gates are complete.
+| Area | Observed result |
+| --- | --- |
+| API unit boundaries | 26 assertions passed for typed input and bounded JSON handling |
+| HTTP integration | 360 assertions passed: all 22 table scopes and cursor pages, complete metadata, query/report modes, catalog shapes, service-key rejection, invalid inputs, actor/role isolation and reference/event mutations |
+| Browser-facing security | 12 checks passed: exact Origin, JSON-only requests, HttpOnly/Strict cookies, login token removal, logout revocation and no service key in browser assets |
+| HTTP business workflows | 38 assertions passed: organizer/customer creation, one-tier performances, price/seat holds, reserved and GA booking, two-account resale, correct acquisition refund, immutable primary sale, organizer cancellation and real NLP review persistence |
+| Build/startup | Maven compile/dependency copy, locked npm install, strict TypeScript and production Next.js build passed; public Windows launcher started both services, checked all 22 tables through the browser endpoint, then cleaned up both child processes |
+| Dependencies | `npm audit` reported zero vulnerabilities in the installed lockfile on the verification date |
+
+Browser acceptance used the Chrome extension tools against the production build. It covered customer sign-in, booking/listing/withdrawal/cancellation, organizer reference creation/deletion, indexed browsing, all seven query and nine report forms, schema navigation, escaped review text and CSV formula protection. Database snapshots independently confirmed the expected ticket/refund history and no unrelated writes. Reference CRUD restored all 22 logical tables exactly. Failed test-oracle attempts and their corrections remain in the private evidence ledger.
+
+The complete schema graph renders 22 entities and 39 foreign keys. A single click on an entity or relationship opens its table; 72 performances browse in indexed pages with the expected second-page IDs. At a 390-pixel mobile viewport the page fits without document overflow, while wide tables scroll inside their own container. Modal reverse-tab focus stays inside the dialog. No browser errors/warnings were observed in the final graph navigation check.
+
+The browser clear-all action emptied every table; each query/report form then displayed an explicit empty result without an error. The browser regenerated the fresh demonstration dataset, which passed 64 independent requirement/invariant checks. Four pre-reset session tokens remained invalid after clearing and after reloading reused account IDs. Temporary workflow records were removed by this final reset; the clean demonstration dataset remains loaded.
+
+After contrast corrections, Lighthouse snapshot audits of the desktop and mobile overview each scored 100 for accessibility, best practices, SEO and agentic browsing (29 passed audits, zero failures). These are observations of those overview states, not a performance benchmark or an accessibility guarantee for every interaction. The schema graph was additionally checked visually and by entity/edge navigation.
+
+The Web environment used Node 24.15.0, Next.js 16.3.8, React 19.3.0, React Flow 12.12.0 and Jackson 2.22.3. Windows startup was executed end to end, including fresh dependency installation. Bash launchers passed syntax checks; Linux/macOS runtime execution was not performed. Authentication and payment behavior are local simulations. Concurrent application instances and external SQL/TUI writers are outside the single Java API maintenance gate.

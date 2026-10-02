@@ -1,7 +1,7 @@
 # A short workflow tour
 
-Start with the synthetic inventory: Q6 for performance 1 shows available, sold and blocked seats. Q7 with performance 1, quantity 2 and budget 500 demonstrates a consecutive-seat search. Q1 near latitude 43.6426 / longitude -79.3871 locates nearby demonstration venues.
+Start the [Web workspace](../README.md) and generate a fresh demo. Events & tickets exposes the complete booking/resale/review journey, while Organizer studio manages events, prices and inventory. Queries → Seat availability for performance 5 compares reserved and standing sections; Sit together finds consecutive seats. Nearby events at latitude 43.6426 / longitude -79.3871 searches Toronto venues.
 
-R1 can compare revenue by city for 2026. R9 finds recurring noun phrases in synthetic reviews once the English models are installed. Date-sensitive results depend on the clock and chosen range; a successful query is not proof that every boundary condition is correct.
+Reports → Sales revenue compares cities over the preceding year. Audience voices ranks stored review noun phrases. All seven searches and nine reports include their original modes. Dates are generated relative to the UTC load day; [verification](../docs/verification.md) distinguishes exact business assertions from execution coverage.
 
-Five real terminal result tables and an authored diagram of all twenty tables illustrate the public README. No GUI is implied by these terminal captures.
+Schema explorer renders all 22 entities and 39 relationships from the installed database. Select an entity, inspect its columns, open records, then follow foreign keys. Data browser uses indexed cursor pagination and scopes personal history to your account. Older terminal images remain historical artifacts and are not current acceptance evidence.

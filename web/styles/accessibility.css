@@ -1,0 +1,109 @@
+/* Keep secondary text and controls readable on the workspace's pale surfaces. */
+:root {
+  --muted: #626f64;
+  --accent: #b65b2b;
+  --accent-dark: #98471f;
+}
+.pill {
+  color: #59694e;
+}
+.sidebar button small {
+  opacity: 1;
+}
+.environment {
+  color: #536946;
+}
+.mini-graph {
+  opacity: 1;
+  clip-path: inset(0 0 0 90px);
+}
+.mini-node {
+  color: #40563b;
+}
+.eyebrow,
+.stat-card small,
+.stat-card > div,
+.caption,
+.bar-row > span,
+.bar-row strong,
+.shortcut small,
+.event-preview-row small,
+.footer,
+.column-list small,
+.entity-fields span,
+.entity-fields small,
+.entity-node-footer,
+.entity-node-title > span,
+.graph-legend,
+.relation-list small,
+.table-footer,
+.field-grid label small,
+.muted,
+.table-toolbar .muted,
+.breadcrumb,
+.demo-metrics span,
+.demo-credentials p,
+.demo-credentials code,
+.trust-item,
+.entity-list button,
+.tool-list button,
+.tool-id,
+.demo-login p,
+.demo-login button,
+.segmented button,
+th,
+.account-button small,
+.filter-strip input::placeholder,
+.search-small input::placeholder,
+.graph-toolbar input::placeholder {
+  color: #586b4f;
+}
+.feature-card p {
+  color: #526348;
+}
+.event-monogram {
+  color: #4e6242;
+}
+.danger-zone p {
+  color: #76634f;
+}
+.danger-outline {
+  color: #89492e;
+}
+.badge.green {
+  color: #4b6338;
+}
+.badge.neutral {
+  color: #746046;
+}
+.auth-notice {
+  color: #71603e;
+}
+.empty-state,
+.empty-state h3 {
+  color: #5b6f4b;
+}
+.demo-metrics strong {
+  color: #5a7148;
+}
+.sidebar-credit {
+  color: #bdccbe;
+}
+@media (max-width: 700px) {
+  .mini-graph {
+    display: none;
+  }
+  .feature-card {
+    min-height: 290px;
+  }
+  .stat-card small {
+    font-size: 10px;
+    display: block;
+    margin-top: 5px;
+  }
+  .sidebar button,
+  .tool-list button,
+  .entity-list button {
+    min-height: 40px;
+  }
+}
