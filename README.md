@@ -41,7 +41,7 @@ Configure MYTIX_DB_HOST, MYTIX_DB_PORT, MYTIX_DB_NAME and MYTIX_DB_USER in your 
 
 Run `./run.ps1` on Windows or `bash run.sh` on Linux/macOS. The launcher builds through the wrapper, then asks for the MySQL password using masked local input if it is not already set. Passwords are not command-line arguments. Maven downloads JDBC 8.0.29 and OpenNLP 1.9.4 and compiles the program for Java 17. Configure your own database; an empty password is not a deployment assumption.
 
-R9 additionally needs compatible English OpenNLP models: en-sent.bin, en-token.bin, en-pos-maxent.bin and en-chunker.bin in src/lib/opennlp/. Models and third-party binaries are not bundled in this copy. Obtain compatible models from the Apache OpenNLP distribution, review their licenses and preserve the required names. Other searches and reports can run independently.
+R9 additionally needs four compatible English OpenNLP models. From the repository root, run `java scripts/InstallNlpModels.java` with JDK 17+ to download the pinned models into ignored `src/lib/opennlp/` and verify their SHA-256 checksums. Repeat the command to verify or repair the installation. See [model setup, sources, and licenses](docs/opennlp-models.md) for custom directories and offline preparation. Other searches and reports can run independently of the models.
 
 ## A short tour
 

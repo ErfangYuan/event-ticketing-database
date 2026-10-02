@@ -6,4 +6,4 @@ Create a dedicated empty demonstration database and a user granted access only t
 
 Set MYTIX_DB_HOST, MYTIX_DB_PORT, MYTIX_DB_NAME and MYTIX_DB_USER in your shell. The launchers prompt locally for MYTIX_DB_PASSWORD if absent. The .env.example file documents names; it is not automatically loaded.
 
-Run ./run.ps1 on Windows or bash run.sh on Linux/macOS. Maven retrieves JDBC/OpenNLP dependencies. The R9 report additionally requires the four compatible English OpenNLP models documented in README; other views can run without the models. Use synthetic seed data only.
+Run ./run.ps1 on Windows or bash run.sh on Linux/macOS. Maven retrieves JDBC/OpenNLP dependencies. For R9, run `java scripts/InstallNlpModels.java` from the repository root with JDK 17+ to install four checksum-verified English models. Model sources and custom directory configuration are documented in docs/opennlp-models.md; other views can run without the models. Use synthetic seed data only.
