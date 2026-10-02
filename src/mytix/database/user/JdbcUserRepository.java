@@ -8,10 +8,12 @@ import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.Period;
 import java.time.YearMonth;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Locale;
+import java.util.UUID;
 import mytix.database.DatabaseLogistics;
 import mytix.util.PasswordUtil;
 
@@ -26,7 +28,7 @@ public final class JdbcUserRepository implements UserRepository {
         }
         String sql =
                 "SELECT userID, email, passwordHash, name, address, birthday, userType, creditCardNumber "
-                        + "FROM users WHERE email = ?";
+                        + "FROM users WHERE email = ? AND deletedAt IS NULL";
         try (Connection c = DatabaseLogistics.getConnection();
                 PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setString(1, normalizeEmail(email));
@@ -58,7 +60,7 @@ public final class JdbcUserRepository implements UserRepository {
             String upgradedHash = PasswordUtil.hash(password);
             try (Connection c = DatabaseLogistics.getConnection();
                     PreparedStatement ps = c.prepareStatement(
-                            "UPDATE users SET passwordHash = ? WHERE userID = ? AND passwordHash = ?")) {
+                            "UPDATE users SET passwordHash = ? WHERE userID = ? AND passwordHash = ? AND deletedAt IS NULL")) {
                 ps.setString(1, upgradedHash);
                 ps.setInt(2, u.userID());
                 ps.setString(3, u.passwordHash());
@@ -94,7 +96,7 @@ public final class JdbcUserRepository implements UserRepository {
         if (!userType.equals("CUSTOMER") && !userType.equals("ORGANIZER")) {
             throw new IllegalArgumentException("userType must be CUSTOMER or ORGANIZER.");
         }
-        int age = Period.between(request.birthday(), LocalDate.now()).getYears();
+        int age = Period.between(request.birthday(), LocalDate.now(ZoneOffset.UTC)).getYears();
         if (age < MIN_AGE) {
             throw new IllegalArgumentException("Account holder must be at least " + MIN_AGE + " years old.");
         }
@@ -177,7 +179,6 @@ public final class JdbcUserRepository implements UserRepository {
         }
         UserRecord user = auth.get();
         int userID = user.userID();
-        boolean isOrganizer = "ORGANIZER".equalsIgnoreCase(user.userType());
 
         Connection c = null;
         try {
@@ -185,46 +186,58 @@ public final class JdbcUserRepository implements UserRepository {
             DatabaseLogistics.begin(c);
 
             try (PreparedStatement ps = c.prepareStatement(
-                    "SELECT passwordHash FROM users WHERE userID = ? FOR UPDATE")) {
+                    "SELECT userID, email, passwordHash, name, address, birthday, userType, creditCardNumber "
+                            + "FROM users WHERE userID = ? AND deletedAt IS NULL FOR UPDATE")) {
                 ps.setInt(1, userID);
                 try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next() || !PasswordUtil.matches(rs.getString(1), password)) {
+                    if (!rs.next() || !PasswordUtil.matches(rs.getString("passwordHash"), password)) {
                         DatabaseLogistics.rollbackQuietly(c);
                         return false;
                     }
+                    user = map(rs);
                 }
             }
 
-            List<String> reasons = new ArrayList<>();
-            if (existsWhere(c, "SELECT 1 FROM orders WHERE customerID = ?", userID)) {
-                reasons.add("has order history");
+            // Do not lock performances here: inventory operations lock performance then user.
+            // Holding the user lock prevents new acquisitions/performances while these current reads run.
+            List<String> unresolved = new ArrayList<>();
+            if (existsWhere(c, "SELECT 1 FROM tickets t JOIN performances p ON p.performanceID = t.performanceID "
+                    + "WHERE t.currentOwnerID = ? AND t.status = 'ACTIVE' "
+                    + "AND TIMESTAMP(p.date, p.startTime) > CURRENT_TIMESTAMP", userID)) {
+                unresolved.add("cancel or transfer tickets for future performances first");
             }
-            if (existsWhere(c, "SELECT 1 FROM tickets WHERE currentOwnerID = ?", userID)) {
-                reasons.add("currently owns tickets");
+            if ("ORGANIZER".equalsIgnoreCase(user.userType()) && existsWhere(c,
+                    "SELECT 1 FROM events e JOIN performances p ON p.eventID = e.eventID "
+                            + "WHERE e.organizerID = ? AND p.status = 'SCHEDULED' "
+                            + "AND TIMESTAMP(p.date, p.startTime) > CURRENT_TIMESTAMP", userID)) {
+                unresolved.add("cancel future scheduled performances first");
             }
-            if (existsWhere(c, "SELECT 1 FROM ticket_ownership WHERE ownerID = ?", userID)) {
-                reasons.add("has ticket ownership history");
-            }
-            if (existsWhere(
-                    c, "SELECT 1 FROM resale_listings WHERE sellerID = ? OR buyerID = ?", userID, userID)) {
-                reasons.add("has resale listing history");
-            }
-            if (existsWhere(c, "SELECT 1 FROM reviews WHERE customerID = ?", userID)) {
-                reasons.add("has written reviews");
-            }
-            if (isOrganizer && existsWhere(c, "SELECT 1 FROM events WHERE organizerID = ?", userID)) {
-                reasons.add("organizes events");
+            if (!unresolved.isEmpty()) {
+                throw new IllegalStateException("Cannot delete account yet; " + String.join("; ", unresolved) + ".");
             }
 
-            if (!reasons.isEmpty()) {
-                DatabaseLogistics.rollbackQuietly(c);
-                throw new IllegalStateException(
-                        "Cannot delete account; existing history: " + String.join(", ", reasons));
-            }
+            boolean hasHistory = existsWhere(c, "SELECT 1 FROM orders WHERE customerID = ?", userID)
+                    || existsWhere(c, "SELECT 1 FROM tickets WHERE currentOwnerID = ? OR cancelledBy = ?", userID, userID)
+                    || existsWhere(c, "SELECT 1 FROM ticket_ownership WHERE ownerID = ?", userID)
+                    || existsWhere(c, "SELECT 1 FROM resale_listings WHERE sellerID = ? OR buyerID = ?", userID, userID)
+                    || existsWhere(c, "SELECT 1 FROM reviews WHERE customerID = ?", userID)
+                    || existsWhere(c, "SELECT 1 FROM events WHERE organizerID = ?", userID);
 
-            try (PreparedStatement ps = c.prepareStatement("DELETE FROM users WHERE userID = ?")) {
-                ps.setInt(1, userID);
-                ps.executeUpdate();
+            if (hasHistory) {
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE users SET email = ?, passwordHash = '!deleted!', name = ?, address = '[removed]', "
+                                + "birthday = '1900-01-01', creditCardNumber = NULL, deletedAt = CURRENT_TIMESTAMP "
+                                + "WHERE userID = ? AND deletedAt IS NULL")) {
+                    ps.setString(1, "deleted+" + userID + "." + UUID.randomUUID() + "@invalid.example");
+                    ps.setString(2, "Deleted account #" + userID);
+                    ps.setInt(3, userID);
+                    ps.executeUpdate();
+                }
+            } else {
+                try (PreparedStatement ps = c.prepareStatement("DELETE FROM users WHERE userID = ?")) {
+                    ps.setInt(1, userID);
+                    ps.executeUpdate();
+                }
             }
 
             if (user.creditCardNumber() != null) {

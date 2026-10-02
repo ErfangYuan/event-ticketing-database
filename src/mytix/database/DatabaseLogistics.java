@@ -17,6 +17,12 @@ public final class DatabaseLogistics {
                 DatabaseConfig.USER,
                 DatabaseConfig.PASSWORD);
         c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        try (var statement = c.createStatement()) {
+            statement.execute("SET time_zone = '+00:00'");
+        } catch (SQLException e) {
+            c.close();
+            throw e;
+        }
         return c;
     }
 

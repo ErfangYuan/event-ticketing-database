@@ -3,14 +3,13 @@ package mytix.ui.query;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import mytix.AppContext;
 import mytix.database.query.Q5Filter;
+import mytix.database.query.GeographicFilter;
 import mytix.ui.AbstractMenu;
 import mytix.ui.MenuAction;
 import mytix.util.ConsoleIO;
@@ -21,8 +20,6 @@ public final class QueryMenu extends AbstractMenu {
     private final AppContext ctx;
 
     
-    private List<String> lastQ4PerfIds = List.of();
-
     public QueryMenu(ConsoleIO io, AppContext ctx) {
         super(io, "Queries (Q1–Q7)", "8", "Back to main menu");
         this.ctx = ctx;
@@ -103,45 +100,44 @@ public final class QueryMenu extends AbstractMenu {
                 return;
             }
             int minAvailable = io.promptInt("minAvailableTickets", 1);
+            GeographicFilter geography = promptGeography();
+            if (geography == null) {
+                io.pause();
+                return;
+            }
             List<String> headers =
                     List.of("performanceID", "title", "venue", "city", "date", "startTime", "available");
-            List<List<String>> rows = ctx.queries().q4TemporalAvailability(from, to, minAvailable);
+            List<List<String>> rows = ctx.queries().q4TemporalAvailability(from, to, minAvailable, geography);
             Tabulator.printTable("Q4 Results", headers, rows);
-
-            lastQ4PerfIds = new ArrayList<>();
-            for (List<String> row : rows) {
-                if (!row.isEmpty()) {
-                    lastQ4PerfIds.add(row.get(0));
-                }
-            }
-            if (!rows.isEmpty()) {
-                String filterMode = io.choose(
-                        "Filter results?",
-                        List.of("Show all", "Enter performanceIDs to keep"),
-                        List.of("all", "filter"),
-                        1);
-                if (filterMode.equals("filter")) {
-                    String filterRaw = io.promptNonEmpty("performanceIDs to keep (comma-separated): ");
-                    Set<String> keep = new java.util.HashSet<>();
-                    for (String token : filterRaw.split(",")) {
-                        token = token.trim();
-                        if (!token.isEmpty()) {
-                            keep.add(token);
-                        }
-                    }
-                    List<List<String>> filtered = new ArrayList<>();
-                    for (List<String> row : rows) {
-                        if (!row.isEmpty() && keep.contains(row.get(0))) {
-                            filtered.add(row);
-                        }
-                    }
-                    Tabulator.printTable("Q4 Results (filtered)", headers, filtered);
-                }
-            }
         } catch (IllegalStateException e) {
             System.out.println("Query failed: " + e.getMessage());
         }
         io.pause();
+    }
+
+    private GeographicFilter promptGeography() {
+        String mode = io.choose("Geographic refinement:",
+                List.of("All locations", "Vicinity", "Postal / adjacent", "Exact address"),
+                List.of("ALL", "VICINITY", "POSTAL", "ADDRESS"), 1);
+        if (mode.equals("POSTAL")) {
+            return GeographicFilter.postal(io.promptNonEmpty("postalCode: "));
+        }
+        if (mode.equals("ADDRESS")) {
+            return GeographicFilter.address(io.promptNonEmpty("address: "));
+        }
+        if (mode.equals("VICINITY")) {
+            Double lat = promptDouble("latitude");
+            Double lng = promptDouble("longitude");
+            if (lat == null || lng == null) {
+                return null;
+            }
+            int radius = io.promptInt("distance km", 15);
+            String rank = io.choose("Rank results by:",
+                    List.of("Distance", "Ascending price", "Descending price"),
+                    List.of("distance", "price_asc", "price_desc"), 1);
+            return GeographicFilter.vicinity(lat, lng, radius, rank);
+        }
+        return GeographicFilter.all();
     }
 
     private void q5() {

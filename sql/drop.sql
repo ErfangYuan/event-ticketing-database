@@ -3,6 +3,7 @@
 
 SET FOREIGN_KEY_CHECKS = 0;
 
+DROP TABLE IF EXISTS review_noun_phrases;
 DROP TABLE IF EXISTS reviews;
 DROP TABLE IF EXISTS resale_listings;
 DROP TABLE IF EXISTS ticket_ownership;
@@ -21,6 +22,7 @@ DROP TABLE IF EXISTS venues;
 DROP TABLE IF EXISTS users;
 DROP TABLE IF EXISTS genres;
 DROP TABLE IF EXISTS segments;
+DROP TABLE IF EXISTS postal_adjacencies;
 DROP TABLE IF EXISTS postal_areas;
 DROP TABLE IF EXISTS payment_cards;
 

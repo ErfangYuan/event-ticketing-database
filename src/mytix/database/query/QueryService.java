@@ -16,6 +16,9 @@ public interface QueryService {
     List<List<String>> q4TemporalAvailability(
             LocalDate from, LocalDate to, int minAvailable);
 
+    List<List<String>> q4TemporalAvailability(
+            LocalDate from, LocalDate to, int minAvailable, GeographicFilter geography);
+
     List<List<String>> q5Combined(Q5Filter filter);
 
     List<List<String>> q6SeatMapSummary(int performanceID);

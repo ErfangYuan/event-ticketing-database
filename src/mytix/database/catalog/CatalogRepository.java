@@ -33,8 +33,12 @@ public interface CatalogRepository {
     
     List<List<String>> listCustomerTickets(int customerID);
 
+    List<List<String>> listCustomerPurchaseHistory(int customerID);
+
     
     List<List<String>> ticketDetail(int ticketID);
+
+    List<List<String>> ticketDetail(int customerID, int ticketID);
 
     List<List<String>> listActiveResaleListings(int excludeSellerID);
 

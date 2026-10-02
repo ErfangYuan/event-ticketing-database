@@ -16,6 +16,10 @@ End-of-input aborts an incomplete command immediately. It does not supply blank 
 
 Customer registration requires a fictitious card identifier and a complete expiry in `YYYY-MM` format. No card-brand, Luhn, real-account or expiry-in-the-future check is performed. Required profile data and expiry syntax are checked before any database writes.
 
-Deleting an unused account also removes its payment-card row if no other user or order references that card, in the same transaction. A card used by another account or historical order is retained. The current deletion workflow still refuses accounts with purchase, ownership, resale, review or organizer-event history; history-preserving deactivation is tracked separately in issue #8.
+Deleting an unused account also removes its payment-card row if no other user or order references that card, in the same transaction. A card used by another account or historical order is retained.
+
+Accounts with history are deactivated in place: the database keeps their user ID and role for transaction/report references, replaces the email with a unique tombstone, replaces name/address/birthday with nonpersonal values, disables the password, clears the profile card and records `deletedAt`. Orders, payment snapshots, acquisitions, ticket ownership, cancellations, resales, reviews and organizer events remain intact. Deleted profiles cannot be looked up for authentication, sign in, or continue authorized mutations through an old session. The old email can be used for a new account with a different ID; this does not transfer the old account's history or privileges.
+
+Before deletion, customers must cancel or transfer their active tickets for future performances; organizers must cancel future scheduled performances. The TUI explains these outstanding actions and leaves the database unchanged when deletion is refused. Past/history-only accounts can be deactivated without erasing sales or reviews. Normal cancellation deadlines still apply; deletion does not bypass them.
 
 Implementation references: [JDK PBEKeySpec](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/javax/crypto/spec/PBEKeySpec.html), [JDK Console and terminal detection](https://docs.oracle.com/en/java/javase/24/docs/api/java.base/java/io/Console.html).

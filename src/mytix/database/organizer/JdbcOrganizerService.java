@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import mytix.database.DatabaseLogistics;
+import mytix.database.transaction.TicketLedger;
 
 public final class JdbcOrganizerService implements OrganizerService {
 
@@ -22,6 +23,17 @@ public final class JdbcOrganizerService implements OrganizerService {
 
     @Override
     public int createEvent(CreateEventRequest request) {
+        if (request == null || request.title() == null || request.title().isBlank()
+                || request.artistIDsInBillingOrder() == null || request.artistIDsInBillingOrder().isEmpty()) {
+            throw new IllegalArgumentException("An event requires a title and at least one artist.");
+        }
+        if (new HashSet<>(request.artistIDsInBillingOrder()).size() != request.artistIDsInBillingOrder().size()) {
+            throw new IllegalArgumentException("An artist cannot appear twice in an event's billing order.");
+        }
+        if (request.resaleCapRatio() == null || request.resaleCapRatio().signum() <= 0
+                || request.resaleCapRatio().stripTrailingZeros().scale() > 2) {
+            throw new IllegalArgumentException("Resale cap must be a positive ratio with at most two decimals.");
+        }
         String insEvent =
                 "INSERT INTO events (organizerID, genreID, title, resaleCapRatio) VALUES (?, ?, ?, ?)";
         String insArtist =
@@ -30,6 +42,8 @@ public final class JdbcOrganizerService implements OrganizerService {
         try {
             c = DatabaseLogistics.getConnection();
             DatabaseLogistics.begin(c);
+
+            TicketLedger.requireRole(c, request.organizerID(), "ORGANIZER");
 
             int eventID;
             try (PreparedStatement ps = c.prepareStatement(insEvent, Statement.RETURN_GENERATED_KEYS)) {
@@ -65,6 +79,9 @@ public final class JdbcOrganizerService implements OrganizerService {
         } catch (SQLException e) {
             DatabaseLogistics.rollbackQuietly(c);
             throw new IllegalStateException("createEvent failed: " + e.getMessage(), e);
+        } catch (RuntimeException e) {
+            DatabaseLogistics.rollbackQuietly(c);
+            throw e;
         } finally {
             closeQuietly(c);
         }
@@ -93,8 +110,24 @@ public final class JdbcOrganizerService implements OrganizerService {
 
     @Override
     public List<List<String>> suggestPricing(int venueID, int genreID, LocalDate date) {
-        
-        
+        if (venueID <= 0 || genreID <= 0 || date == null
+                || date.isBefore(LocalDate.now(java.time.ZoneOffset.UTC))) {
+            throw new IllegalArgumentException("Pricing suggestions require a venue, genre and current or future UTC date.");
+        }
+        try (Connection c = DatabaseLogistics.getConnection();
+                PreparedStatement ps = c.prepareStatement(
+                        "SELECT 1 FROM venues v CROSS JOIN genres g WHERE v.venueID=? AND g.genreID=?")) {
+            ps.setInt(1, venueID);
+            ps.setInt(2, genreID);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) throw new IllegalArgumentException("Venue or genre not found.");
+            }
+        } catch (SQLException error) {
+            throw new IllegalStateException("Pricing target could not be checked.", error);
+        }
+        if (targetCapacity(venueID) <= 0) {
+            throw new IllegalArgumentException("Pricing suggestions require positive venue capacity.");
+        }
         List<TierSample> samples = fetchToolkitSamples(venueID, genreID);
 
         Set<Integer> perfIDs = new HashSet<>();
@@ -177,17 +210,17 @@ public final class JdbcOrganizerService implements OrganizerService {
         String sql =
                 """
                 WITH venue_capacity AS (
-                  SELECT v.venueID AS venueID, pa.city AS city,
+                  SELECT v.venueID AS venueID, pa.city AS city, pa.country AS country,
                          COALESCE(SUM(CASE WHEN s.isGeneralAdmission = 1 THEN s.standingCapacity ELSE 0 END), 0)
                          + COALESCE((SELECT COUNT(*) FROM seats se JOIN sections s2 ON s2.sectionID = se.sectionID
                                       WHERE s2.venueID = v.venueID AND s2.isGeneralAdmission = 0), 0) AS capacity
                   FROM venues v
                   JOIN postal_areas pa ON pa.postalCode = v.postalCode
                   LEFT JOIN sections s ON s.venueID = v.venueID AND s.isGeneralAdmission = 1
-                  GROUP BY v.venueID, pa.city
+                  GROUP BY v.venueID, pa.city, pa.country
                 ),
                 target AS (
-                  SELECT vc.city AS city, vc.capacity AS capacity, g.segmentID AS segmentID
+                  SELECT vc.city AS city, vc.country AS country, vc.capacity AS capacity, g.segmentID AS segmentID
                   FROM venue_capacity vc
                   JOIN genres g ON g.genreID = ?
                   WHERE vc.venueID = ?
@@ -199,7 +232,7 @@ public final class JdbcOrganizerService implements OrganizerService {
                   JOIN venue_capacity vc ON vc.venueID = p.venueID
                   CROSS JOIN target t
                   WHERE e.genreID = ?
-                    AND vc.city = t.city
+                    AND vc.city = t.city AND vc.country = t.country
                     AND vc.capacity BETWEEN 0.7 * t.capacity AND 1.3 * t.capacity
                     AND p.status <> 'CANCELLED'
                     AND p.date < CURDATE()
@@ -237,14 +270,14 @@ public final class JdbcOrganizerService implements OrganizerService {
                 ),
                 topn AS (
                   SELECT performanceID, priority,
-                         ROW_NUMBER() OVER (ORDER BY priority ASC, pdate DESC) AS rn
+                         ROW_NUMBER() OVER (ORDER BY priority ASC, pdate DESC, performanceID) AS rn
                   FROM best
                 )
                 SELECT
                   tn.performanceID AS performanceID,
                   tn.priority AS priority,
                   pt.price AS price,
-                  ROW_NUMBER() OVER (PARTITION BY tn.performanceID ORDER BY pt.price DESC) AS tierRank,
+                  ROW_NUMBER() OVER (PARTITION BY tn.performanceID ORDER BY pt.price DESC, pt.tierID) AS tierRank,
                   (SELECT COALESCE(SUM(CASE WHEN sec.isGeneralAdmission = 1 THEN sec.standingCapacity
                                             ELSE (SELECT COUNT(*) FROM seats se WHERE se.sectionID = sec.sectionID) END), 0)
                    FROM performance_section_tiers pst2
@@ -299,7 +332,7 @@ public final class JdbcOrganizerService implements OrganizerService {
         int k = 3;
         long bestFreq = -1;
         for (Map.Entry<Integer, Long> e : freq.entrySet()) {
-            if (e.getValue() > bestFreq) {
+            if (e.getValue() > bestFreq || (e.getValue() == bestFreq && e.getKey() < k)) {
                 bestFreq = e.getValue();
                 k = e.getKey();
             }
@@ -351,9 +384,19 @@ public final class JdbcOrganizerService implements OrganizerService {
     @Override
     public double estimateDeltaRevenue(
             double suggestedPrice, double tierCapacityUnits, double sellThrough, double delta) {
+        if (!Double.isFinite(suggestedPrice) || !Double.isFinite(tierCapacityUnits)
+                || !Double.isFinite(sellThrough) || !Double.isFinite(delta)
+                || suggestedPrice < 0 || tierCapacityUnits < 0
+                || sellThrough < 0 || sellThrough > 1 || delta < -1) {
+            throw new IllegalArgumentException(
+                    "Estimate inputs must be finite: price/capacity nonnegative, sell-through between 0 and 1, price change at least -100%.");
+        }
         double r0 = tierCapacityUnits * suggestedPrice * sellThrough;
         double adjustedSellThrough = clamp(sellThrough * (1 + ELASTICITY_E * delta), 0.0, 1.0);
         double r1 = tierCapacityUnits * suggestedPrice * (1 + delta) * adjustedSellThrough;
+        if (!Double.isFinite(r0) || !Double.isFinite(r1) || !Double.isFinite(r1 - r0)) {
+            throw new IllegalArgumentException("Estimate inputs exceed the supported numeric range.");
+        }
         return r1 - r0;
     }
 
@@ -363,6 +406,7 @@ public final class JdbcOrganizerService implements OrganizerService {
 
     @Override
     public int targetCapacity(int venueID) {
+        if (venueID <= 0) throw new IllegalArgumentException("Venue ID must be positive.");
         String sql =
                 """
                 SELECT COALESCE(SUM(CASE WHEN s.isGeneralAdmission = 1 THEN s.standingCapacity ELSE 0 END), 0)
@@ -385,14 +429,23 @@ public final class JdbcOrganizerService implements OrganizerService {
 
     @Override
     public int createPerformance(CreatePerformanceRequest request) {
-        if (request.tierPrices() == null || request.tierPrices().size() < 2) {
-            throw new IllegalArgumentException("At least 2 price tiers are required.");
+        if (request == null || request.tierPrices() == null || request.tierPrices().isEmpty()) {
+            throw new IllegalArgumentException("At least one price tier is required.");
+        }
+        if (request.date() == null || request.startTime() == null || request.endTime() == null
+                || !request.endTime().isAfter(request.startTime())) {
+            throw new IllegalArgumentException("Performance end time must follow its start time.");
+        }
+        for (Map.Entry<String, BigDecimal> tier : request.tierPrices().entrySet()) {
+            if (tier.getKey() == null || tier.getKey().isBlank()) throw new IllegalArgumentException("Tier names are required.");
+            TicketLedger.money(tier.getValue(), "Tier price");
         }
         Connection c = null;
         try {
             c = DatabaseLogistics.getConnection();
             DatabaseLogistics.begin(c);
 
+            TicketLedger.requireRole(c, request.organizerID(), "ORGANIZER");
             try (PreparedStatement ps =
                     c.prepareStatement("SELECT organizerID FROM events WHERE eventID = ?")) {
                 ps.setInt(1, request.eventID());
@@ -488,6 +541,9 @@ public final class JdbcOrganizerService implements OrganizerService {
         } catch (SQLException e) {
             DatabaseLogistics.rollbackQuietly(c);
             throw new IllegalStateException("createPerformance failed: " + e.getMessage(), e);
+        } catch (RuntimeException e) {
+            DatabaseLogistics.rollbackQuietly(c);
+            throw e;
         } finally {
             closeQuietly(c);
         }
@@ -495,11 +551,13 @@ public final class JdbcOrganizerService implements OrganizerService {
 
     @Override
     public boolean updateTierPrice(int organizerID, int tierID, BigDecimal newPrice) {
+        newPrice = TicketLedger.money(newPrice, "Tier price");
         Connection c = null;
         try {
             c = DatabaseLogistics.getConnection();
             DatabaseLogistics.begin(c);
 
+            int performanceID;
             try (PreparedStatement ps = c.prepareStatement(
                     "SELECT pt.performanceID, e.organizerID FROM price_tiers pt "
                             + "JOIN performances p ON p.performanceID = pt.performanceID "
@@ -512,14 +570,16 @@ public final class JdbcOrganizerService implements OrganizerService {
                     if (rs.getInt(2) != organizerID) {
                         throw new IllegalStateException("Tier does not belong to this organizer.");
                     }
+                    performanceID = rs.getInt(1);
                 }
             }
+            requireOwnership(c, organizerID, performanceID).requireUpcoming(c);
 
             try (PreparedStatement ps = c.prepareStatement(
                     "SELECT COUNT(*) FROM tickets t "
                             + "JOIN performance_section_tiers pst "
                             + "  ON pst.sectionID = t.sectionID AND pst.performanceID = t.performanceID "
-                            + "WHERE pst.tierID = ? AND t.status = 'ACTIVE'")) {
+                            + "WHERE pst.tierID = ?")) {
                 ps.setInt(1, tierID);
                 try (ResultSet rs = ps.executeQuery()) {
                     rs.next();
@@ -542,6 +602,9 @@ public final class JdbcOrganizerService implements OrganizerService {
         } catch (SQLException e) {
             DatabaseLogistics.rollbackQuietly(c);
             throw new IllegalStateException("updateTierPrice failed: " + e.getMessage(), e);
+        } catch (RuntimeException e) {
+            DatabaseLogistics.rollbackQuietly(c);
+            throw e;
         } finally {
             closeQuietly(c);
         }
@@ -553,7 +616,7 @@ public final class JdbcOrganizerService implements OrganizerService {
         try {
             c = DatabaseLogistics.getConnection();
             DatabaseLogistics.begin(c);
-            requireOwnership(c, organizerID, performanceID);
+            requireOwnership(c, organizerID, performanceID).requireUpcoming(c);
 
             try (PreparedStatement ps = c.prepareStatement(
                     "SELECT COUNT(*) FROM seats se "
@@ -599,6 +662,9 @@ public final class JdbcOrganizerService implements OrganizerService {
         } catch (SQLException e) {
             DatabaseLogistics.rollbackQuietly(c);
             throw new IllegalStateException("blockSeat failed: " + e.getMessage(), e);
+        } catch (RuntimeException e) {
+            DatabaseLogistics.rollbackQuietly(c);
+            throw e;
         } finally {
             closeQuietly(c);
         }
@@ -625,6 +691,9 @@ public final class JdbcOrganizerService implements OrganizerService {
         } catch (SQLException e) {
             DatabaseLogistics.rollbackQuietly(c);
             throw new IllegalStateException("unblockSeat failed: " + e.getMessage(), e);
+        } catch (RuntimeException e) {
+            DatabaseLogistics.rollbackQuietly(c);
+            throw e;
         } finally {
             closeQuietly(c);
         }
@@ -667,38 +736,35 @@ public final class JdbcOrganizerService implements OrganizerService {
                 ps.executeUpdate();
             }
 
+            List<Integer> ticketsToRefund = new ArrayList<>();
             try (PreparedStatement ps = c.prepareStatement(
-                    "UPDATE tickets SET status = 'REFUNDED', cancelledAt = NOW() "
-                            + "WHERE performanceID = ? AND status = 'ACTIVE'")) {
+                    "SELECT ticketID FROM tickets WHERE performanceID=? AND status='ACTIVE' ORDER BY ticketID FOR UPDATE")) {
                 ps.setInt(1, performanceID);
-                ps.executeUpdate();
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) ticketsToRefund.add(rs.getInt(1));
+                }
             }
+            for (int ticketID : ticketsToRefund) TicketLedger.refundTicket(c, ticketID, organizerID, "ORGANIZER");
 
             DatabaseLogistics.commit(c);
             return true;
         } catch (SQLException e) {
             DatabaseLogistics.rollbackQuietly(c);
             throw new IllegalStateException("cancelPerformance failed: " + e.getMessage(), e);
+        } catch (RuntimeException e) {
+            DatabaseLogistics.rollbackQuietly(c);
+            throw e;
         } finally {
             closeQuietly(c);
         }
     }
 
-    private static void requireOwnership(Connection c, int organizerID, int performanceID)
+    private static TicketLedger.Performance requireOwnership(Connection c, int organizerID, int performanceID)
             throws SQLException {
-        try (PreparedStatement ps = c.prepareStatement(
-                "SELECT e.organizerID FROM performances p "
-                        + "JOIN events e ON e.eventID = p.eventID WHERE p.performanceID = ?")) {
-            ps.setInt(1, performanceID);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) {
-                    throw new IllegalStateException("Performance not found.");
-                }
-                if (rs.getInt(1) != organizerID) {
-                    throw new IllegalStateException("Performance does not belong to this organizer.");
-                }
-            }
-        }
+        TicketLedger.Performance performance = TicketLedger.lockPerformance(c, performanceID);
+        TicketLedger.requireRole(c, organizerID, "ORGANIZER");
+        if (performance.organizerID() != organizerID) throw new IllegalStateException("Performance does not belong to this organizer.");
+        return performance;
     }
 
     private static void closeQuietly(Connection c) {

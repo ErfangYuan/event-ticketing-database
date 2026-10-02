@@ -1,6 +1,6 @@
 -- MyTix schema.sql
 -- Creates the complete schema (MySQL 8). Run on a clean database (or run drop.sql first).
--- JDBC note: default connection is root with empty password; document alternatives in the manual.
+-- Transaction and acquisition history is explicit; all sample credentials/data are synthetic.
 
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
@@ -13,9 +13,11 @@ CREATE TABLE payment_cards (
 
 CREATE TABLE postal_areas (
   postalCode  VARCHAR(16) NOT NULL,
+  normalizedCode VARCHAR(16) GENERATED ALWAYS AS (UPPER(REPLACE(REPLACE(postalCode, ' ', ''), '-', ''))) STORED,
   city        VARCHAR(64) NOT NULL,
   country     VARCHAR(64) NOT NULL,
   PRIMARY KEY (postalCode),
+  UNIQUE KEY uk_postal_normalized (normalizedCode),
   CONSTRAINT chk_postal_country
     CHECK (country IN ('Canada', 'United States'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -24,6 +26,15 @@ CREATE TABLE segments (
   segmentID   INT AUTO_INCREMENT PRIMARY KEY,
   segmentName VARCHAR(64) NOT NULL,
   UNIQUE KEY uk_segments_name (segmentName)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE postal_adjacencies (
+  postalCode         VARCHAR(16) NOT NULL,
+  adjacentPostalCode VARCHAR(16) NOT NULL,
+  PRIMARY KEY (postalCode, adjacentPostalCode),
+  CONSTRAINT fk_adjacent_postal FOREIGN KEY (postalCode) REFERENCES postal_areas (postalCode),
+  CONSTRAINT fk_adjacent_neighbor FOREIGN KEY (adjacentPostalCode) REFERENCES postal_areas (postalCode),
+  CONSTRAINT chk_adjacent_pair CHECK (postalCode < adjacentPostalCode)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE genres (
@@ -45,12 +56,14 @@ CREATE TABLE users (
   userType          ENUM('CUSTOMER', 'ORGANIZER') NOT NULL,
   creditCardNumber  VARCHAR(32) NULL,
   createdAt         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deletedAt         TIMESTAMP NULL,
   UNIQUE KEY uk_users_email (email),
   CONSTRAINT fk_users_card
     FOREIGN KEY (creditCardNumber) REFERENCES payment_cards (cardNumber),
   CONSTRAINT chk_users_customer_card
     CHECK (
       userType = 'ORGANIZER'
+      OR deletedAt IS NOT NULL
       OR creditCardNumber IS NOT NULL
     )
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -104,7 +117,7 @@ CREATE TABLE events (
   organizerID     INT NOT NULL,
   genreID         INT NOT NULL,
   title           VARCHAR(255) NOT NULL,
-  resaleCapRatio  DECIMAL(5,2) NOT NULL DEFAULT 2.00,
+  resaleCapRatio  DECIMAL(5,2) NOT NULL DEFAULT 1.20,
   CONSTRAINT fk_events_organizer
     FOREIGN KEY (organizerID) REFERENCES users (userID),
   CONSTRAINT fk_events_genre
@@ -187,16 +200,24 @@ CREATE TABLE blocked_seats (
 CREATE TABLE orders (
   orderID          INT AUTO_INCREMENT PRIMARY KEY,
   customerID       INT NOT NULL,
+  performanceID    INT NOT NULL,
+  orderType        ENUM('PRIMARY', 'RESALE') NOT NULL,
   orderTimestamp   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   totalAmount      DECIMAL(12,2) NOT NULL,
   cardNumber       VARCHAR(32) NOT NULL,
+  cardExpiry       CHAR(7) NOT NULL COMMENT 'Payment expiry snapshot, YYYY-MM',
+  refundedAmount   DECIMAL(12,2) NOT NULL DEFAULT 0,
   status           ENUM('COMPLETED', 'CANCELLED') NOT NULL DEFAULT 'COMPLETED',
   CONSTRAINT fk_orders_customer
     FOREIGN KEY (customerID) REFERENCES users (userID),
   CONSTRAINT fk_orders_card
     FOREIGN KEY (cardNumber) REFERENCES payment_cards (cardNumber),
+  CONSTRAINT fk_orders_performance
+    FOREIGN KEY (performanceID) REFERENCES performances (performanceID),
+  KEY idx_orders_customer_time (customerID, orderTimestamp, orderID),
+  KEY idx_orders_performance_time (performanceID, orderTimestamp, orderID),
   CONSTRAINT chk_orders_amount
-    CHECK (totalAmount >= 0)
+    CHECK (totalAmount >= 0 AND refundedAmount >= 0 AND refundedAmount <= totalAmount)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE tickets (
@@ -209,6 +230,10 @@ CREATE TABLE tickets (
   faceValue        DECIMAL(10,2) NOT NULL,
   status           ENUM('ACTIVE', 'CANCELLED', 'REFUNDED') NOT NULL DEFAULT 'ACTIVE',
   cancelledAt      TIMESTAMP NULL,
+  cancelledBy      INT NULL,
+  cancellationType ENUM('CUSTOMER', 'ORGANIZER') NULL,
+  refundOrderID    INT NULL,
+  refundedAmount   DECIMAL(10,2) NOT NULL DEFAULT 0,
   activeSeatID     INT GENERATED ALWAYS AS (
                      CASE WHEN status = 'ACTIVE' THEN seatID ELSE NULL END
                    ) STORED,
@@ -222,12 +247,18 @@ CREATE TABLE tickets (
     FOREIGN KEY (seatID) REFERENCES seats (seatID),
   CONSTRAINT fk_tickets_owner
     FOREIGN KEY (currentOwnerID) REFERENCES users (userID),
+  CONSTRAINT fk_tickets_cancelled_by
+    FOREIGN KEY (cancelledBy) REFERENCES users (userID),
+  CONSTRAINT fk_tickets_refund_order
+    FOREIGN KEY (refundOrderID) REFERENCES orders (orderID),
   CONSTRAINT chk_tickets_face
-    CHECK (faceValue >= 0),
+    CHECK (faceValue >= 0 AND refundedAmount >= 0),
   CONSTRAINT chk_tickets_cancel
     CHECK (
-      (status = 'ACTIVE' AND cancelledAt IS NULL)
-      OR (status IN ('CANCELLED', 'REFUNDED') AND cancelledAt IS NOT NULL)
+      (status = 'ACTIVE' AND cancelledAt IS NULL AND cancelledBy IS NULL
+       AND cancellationType IS NULL AND refundOrderID IS NULL AND refundedAmount = 0)
+      OR (status IN ('CANCELLED', 'REFUNDED') AND cancelledAt IS NOT NULL
+          AND cancelledBy IS NOT NULL AND cancellationType IS NOT NULL AND refundOrderID IS NOT NULL)
     ),
   UNIQUE KEY uk_tickets_perf_active_seat (performanceID, activeSeatID)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -236,21 +267,30 @@ CREATE TABLE ticket_ownership (
   ownershipID  INT AUTO_INCREMENT PRIMARY KEY,
   ticketID     INT NOT NULL,
   ownerID      INT NOT NULL,
+  orderID      INT NOT NULL,
+  amountPaid   DECIMAL(10,2) NOT NULL,
   acquiredAt   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   source       ENUM('PURCHASE', 'RESALE') NOT NULL,
   CONSTRAINT fk_own_ticket
     FOREIGN KEY (ticketID) REFERENCES tickets (ticketID),
   CONSTRAINT fk_own_owner
     FOREIGN KEY (ownerID) REFERENCES users (userID),
-  KEY idx_own_ticket_time (ticketID, acquiredAt)
+  CONSTRAINT fk_own_order
+    FOREIGN KEY (orderID) REFERENCES orders (orderID),
+  CONSTRAINT chk_own_paid CHECK (amountPaid >= 0),
+  UNIQUE KEY uk_own_ticket_order (ticketID, orderID),
+  KEY idx_own_ticket_time (ticketID, acquiredAt, ownershipID),
+  KEY idx_own_owner_time (ownerID, acquiredAt, ownershipID)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE resale_listings (
   listingID      INT AUTO_INCREMENT PRIMARY KEY,
   ticketID       INT NOT NULL,
   sellerID       INT NOT NULL,
+  ownershipID    INT NOT NULL,
   buyerID        INT NULL,
   listingPrice   DECIMAL(10,2) NOT NULL,
+  capRatio       DECIMAL(5,2) NOT NULL COMMENT 'Event resale cap at listing creation',
   status         ENUM('ACTIVE', 'SOLD', 'WITHDRAWN') NOT NULL DEFAULT 'ACTIVE',
   createdAt      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   soldAt         TIMESTAMP NULL,
@@ -258,10 +298,14 @@ CREATE TABLE resale_listings (
     FOREIGN KEY (ticketID) REFERENCES tickets (ticketID),
   CONSTRAINT fk_listing_seller
     FOREIGN KEY (sellerID) REFERENCES users (userID),
+  CONSTRAINT fk_listing_ownership
+    FOREIGN KEY (ownershipID) REFERENCES ticket_ownership (ownershipID),
   CONSTRAINT fk_listing_buyer
     FOREIGN KEY (buyerID) REFERENCES users (userID),
   CONSTRAINT chk_listing_price
-    CHECK (listingPrice >= 0),
+    CHECK (listingPrice >= 0 AND capRatio > 0),
+  KEY idx_listing_acquisition (ownershipID, createdAt),
+  KEY idx_listing_completed (status, soldAt, listingID),
   CONSTRAINT chk_listing_sold
     CHECK (
       (status = 'SOLD' AND buyerID IS NOT NULL AND soldAt IS NOT NULL)
@@ -286,6 +330,16 @@ CREATE TABLE reviews (
     CHECK (eventRating BETWEEN 1 AND 5),
   CONSTRAINT chk_reviews_venue_rating
     CHECK (venueRating BETWEEN 1 AND 5)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE review_noun_phrases (
+  reviewID    INT NOT NULL,
+  phraseIndex INT NOT NULL,
+  nounPhrase  TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  PRIMARY KEY (reviewID, phraseIndex),
+  CONSTRAINT fk_phrase_review FOREIGN KEY (reviewID) REFERENCES reviews (reviewID) ON DELETE CASCADE,
+  CONSTRAINT chk_phrase_index CHECK (phraseIndex > 0),
+  CONSTRAINT chk_phrase_nonempty CHECK (CHAR_LENGTH(nounPhrase) > 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 SET FOREIGN_KEY_CHECKS = 1;

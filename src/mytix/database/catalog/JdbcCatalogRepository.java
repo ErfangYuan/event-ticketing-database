@@ -114,7 +114,7 @@ public final class JdbcCatalogRepository implements CatalogRepository {
                 JOIN genres g ON g.genreID = e.genreID
                 JOIN segments s ON s.segmentID = g.segmentID
                 JOIN performances p ON p.eventID = e.eventID
-                WHERE p.status = 'SCHEDULED' AND p.date >= CURDATE()
+                WHERE p.status = 'SCHEDULED' AND TIMESTAMP(p.date,p.startTime) > CURRENT_TIMESTAMP
                 ORDER BY e.eventID
                 """,
                 rs -> List.of(
@@ -132,7 +132,7 @@ public final class JdbcCatalogRepository implements CatalogRepository {
                 FROM performances p
                 JOIN venues v ON v.venueID = p.venueID
                 JOIN postal_areas pa ON pa.postalCode = v.postalCode
-                WHERE p.eventID = ? AND p.status = 'SCHEDULED' AND p.date >= CURDATE()
+                WHERE p.eventID = ? AND p.status = 'SCHEDULED' AND TIMESTAMP(p.date,p.startTime) > CURRENT_TIMESTAMP
                 ORDER BY p.date, p.startTime
                 """;
         return query(sql, ps -> ps.setInt(1, eventID), rs -> List.of(
@@ -275,6 +275,38 @@ public final class JdbcCatalogRepository implements CatalogRepository {
 
     @Override
     public List<List<String>> ticketDetail(int ticketID) {
+        throw new IllegalStateException("Customer context is required to view ticket details.");
+    }
+
+    @Override
+    public List<List<String>> listCustomerPurchaseHistory(int customerID) {
+        String sql = """
+                SELECT a.orderID,t.ticketID,e.title,p.date,sec.sectionName,
+                       CASE WHEN se.seatID IS NULL THEN 'GA' ELSE CONCAT(se.rowName,'-',se.seatNumber) END,
+                       t.status,a.amountPaid,
+                       CASE WHEN t.currentOwnerID=a.ownerID AND a.ownershipID=(
+                           SELECT latest.ownershipID FROM ticket_ownership latest
+                           WHERE latest.ticketID=t.ticketID
+                           ORDER BY latest.acquiredAt DESC,latest.ownershipID DESC LIMIT 1
+                       ) THEN 'CURRENT' ELSE 'TRANSFERRED' END
+                FROM ticket_ownership a JOIN orders o ON o.orderID=a.orderID
+                JOIN tickets t ON t.ticketID=a.ticketID
+                JOIN performances p ON p.performanceID=o.performanceID
+                JOIN events e ON e.eventID=p.eventID
+                JOIN sections sec ON sec.sectionID=t.sectionID
+                JOIN users u ON u.userID=a.ownerID AND u.deletedAt IS NULL
+                LEFT JOIN seats se ON se.seatID=t.seatID
+                WHERE a.ownerID=? AND o.customerID=a.ownerID
+                ORDER BY a.acquiredAt DESC,a.ownershipID DESC
+                """;
+        return query(sql, ps -> ps.setInt(1, customerID), rs -> List.of(
+                String.valueOf(rs.getInt(1)),String.valueOf(rs.getInt(2)),rs.getString(3),
+                rs.getDate(4).toLocalDate().toString(),rs.getString(5),rs.getString(6),
+                rs.getString(7),rs.getBigDecimal(8).toPlainString(),rs.getString(9)));
+    }
+
+    @Override
+    public List<List<String>> ticketDetail(int customerID, int ticketID) {
         String sql =
                 """
                 SELECT t.ticketID,
@@ -282,9 +314,12 @@ public final class JdbcCatalogRepository implements CatalogRepository {
                        (SELECT rl.status FROM resale_listings rl
                         WHERE rl.ticketID = t.ticketID AND rl.status = 'ACTIVE' LIMIT 1) AS activeListing
                 FROM tickets t
-                WHERE t.ticketID = ?
+                WHERE t.ticketID = ? AND EXISTS (
+                    SELECT 1 FROM ticket_ownership a JOIN users u ON u.userID=a.ownerID
+                    WHERE a.ticketID=t.ticketID AND a.ownerID=? AND u.deletedAt IS NULL
+                )
                 """;
-        return query(sql, ps -> ps.setInt(1, ticketID), rs -> List.of(
+        return query(sql, ps -> { ps.setInt(1, ticketID); ps.setInt(2, customerID); }, rs -> List.of(
                 String.valueOf(rs.getInt(1)),
                 String.valueOf(rs.getInt(2)),
                 rs.getString(3) == null ? "none" : "ACTIVE"));
@@ -305,6 +340,8 @@ public final class JdbcCatalogRepository implements CatalogRepository {
                 LEFT JOIN seats se ON se.seatID = t.seatID
                 WHERE rl.status = 'ACTIVE'
                   AND rl.sellerID <> ?
+                  AND t.status='ACTIVE' AND t.currentOwnerID=rl.sellerID
+                  AND p.status='SCHEDULED' AND TIMESTAMP(p.date,p.startTime)>CURRENT_TIMESTAMP
                 ORDER BY rl.listingID
                 """;
         return query(sql, ps -> ps.setInt(1, excludeSellerID), rs -> List.of(
@@ -356,8 +393,16 @@ public final class JdbcCatalogRepository implements CatalogRepository {
                 JOIN venues v ON v.venueID = p.venueID
                 WHERE tow.ownerID = ?
                   AND t.status = 'ACTIVE'
-                  AND p.date < CURDATE()
-                  AND DATEDIFF(CURDATE(), p.date) <= 60
+                  AND p.status='SCHEDULED'
+                  AND TIMESTAMP(p.date,p.endTime)<=CURRENT_TIMESTAMP
+                  AND TIMESTAMP(p.date,p.endTime)>=DATE_SUB(CURRENT_TIMESTAMP,INTERVAL 365 DAY)
+                  AND tow.acquiredAt<=TIMESTAMP(p.date,p.endTime)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ticket_ownership later WHERE later.ticketID=tow.ticketID
+                        AND later.acquiredAt<=TIMESTAMP(p.date,p.endTime)
+                        AND (later.acquiredAt>tow.acquiredAt OR
+                             (later.acquiredAt=tow.acquiredAt AND later.ownershipID>tow.ownershipID))
+                  )
                   AND NOT EXISTS (
                       SELECT 1 FROM reviews r
                       WHERE r.customerID = ? AND r.performanceID = p.performanceID
@@ -416,11 +461,11 @@ public final class JdbcCatalogRepository implements CatalogRepository {
         String sql =
                 """
                 SELECT pt.tierID, pt.tierName, pt.price,
-                       COUNT(t.ticketID) AS activeTickets
+                       COUNT(t.ticketID) AS historicalTickets
                 FROM price_tiers pt
                 LEFT JOIN performance_section_tiers pst ON pst.tierID = pt.tierID
                 LEFT JOIN tickets t ON t.performanceID = pt.performanceID
-                    AND t.sectionID = pst.sectionID AND t.status = 'ACTIVE'
+                    AND t.sectionID = pst.sectionID
                 WHERE pt.performanceID = ?
                 GROUP BY pt.tierID, pt.tierName, pt.price
                 ORDER BY pt.price DESC

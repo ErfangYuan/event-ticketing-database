@@ -8,12 +8,26 @@ import java.sql.SQLException;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import mytix.database.DatabaseLogistics;
 
 public final class JdbcQueryService implements QueryService {
 
     private static final String UPCOMING =
             " p.status = 'SCHEDULED' AND TIMESTAMP(p.date, p.startTime) > CURRENT_TIMESTAMP ";
+
+    private static final String POSTAL_PREDICATE = """
+            EXISTS (
+              SELECT 1 FROM postal_areas requested
+              WHERE requested.normalizedCode = ? AND (
+                pa.postalCode = requested.postalCode OR EXISTS (
+                  SELECT 1 FROM postal_adjacencies adjacency
+                  WHERE (adjacency.postalCode = requested.postalCode AND adjacency.adjacentPostalCode = pa.postalCode)
+                     OR (adjacency.adjacentPostalCode = requested.postalCode AND adjacency.postalCode = pa.postalCode)
+                )
+              )
+            )
+            """;
 
     
     private static final String SECTION_AVAIL_CTE =
@@ -66,11 +80,7 @@ public final class JdbcQueryService implements QueryService {
 
     @Override
     public List<List<String>> q1Vicinity(double lat, double lng, double radiusKm, String rankBy) {
-        if (!Double.isFinite(lat) || lat < -90 || lat > 90
-                || !Double.isFinite(lng) || lng < -180 || lng > 180
-                || !Double.isFinite(radiusKm) || radiusKm < 0) {
-            throw new IllegalStateException("Latitude, longitude and distance must be finite and in range.");
-        }
+        validateCoordinates(lat, lng, radiusKm);
         String sql =
                 "WITH " + SECTION_AVAIL_CTE + ", " + PERF_CHEAPEST_CTE + " "
                         + """
@@ -137,13 +147,11 @@ public final class JdbcQueryService implements QueryService {
                 JOIN postal_areas pa ON pa.postalCode = v.postalCode
                 WHERE """
                         + UPCOMING
-                        + """
-                        AND LEFT(pa.postalCode, 3) = LEFT(?, 3)
-                        ORDER BY p.date, p.startTime
-                        """;
+                        + " AND " + POSTAL_PREDICATE
+                        + " ORDER BY p.date, p.startTime, p.performanceID";
         try (Connection c = DatabaseLogistics.getConnection();
                 PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, postalCode);
+            ps.setString(1, normalizePostal(postalCode));
             return collect(
                     ps,
                     rs -> List.of(
@@ -195,28 +203,74 @@ public final class JdbcQueryService implements QueryService {
 
     @Override
     public List<List<String>> q4TemporalAvailability(LocalDate from, LocalDate to, int minAvailable) {
+        return q4TemporalAvailability(from, to, minAvailable, GeographicFilter.all());
+    }
+
+    @Override
+    public List<List<String>> q4TemporalAvailability(
+            LocalDate from, LocalDate to, int minAvailable, GeographicFilter geography) {
         validateDates(from, to, true);
         requireNonnegative(minAvailable, "Minimum available tickets");
-        String sql =
-                "WITH " + SECTION_AVAIL_CTE + ", " + PERF_AVAIL_CTE + " "
+        if (geography == null || geography.mode() == null) {
+            throw new IllegalStateException("Geographic search mode is required.");
+        }
+        String mode = geography.mode().toUpperCase(Locale.ROOT);
+        List<Object> bind = new ArrayList<>();
+        String distance = "NULL";
+        if (mode.equals("VICINITY")) {
+            if (geography.latitude() == null || geography.longitude() == null || geography.radiusKm() == null) {
+                throw new IllegalStateException("Vicinity search requires coordinates and distance.");
+            }
+            validateCoordinates(geography.latitude(), geography.longitude(), geography.radiusKm());
+            distance = "(2 * 6371.0088 * ASIN(SQRT(LEAST(1.0, GREATEST(0.0, "
+                    + "POWER(SIN(RADIANS(v.latitude - ?) / 2), 2) "
+                    + "+ COS(RADIANS(?)) * COS(RADIANS(v.latitude)) "
+                    + "* POWER(SIN(RADIANS(v.longitude - ?) / 2), 2))))))";
+            bind.add(geography.latitude());
+            bind.add(geography.latitude());
+            bind.add(geography.longitude());
+        } else if (!List.of("ALL", "POSTAL", "ADDRESS").contains(mode)) {
+            throw new IllegalStateException("Unknown geographic search mode.");
+        }
+        StringBuilder sql = new StringBuilder(
+                "WITH " + SECTION_AVAIL_CTE + ", " + PERF_AVAIL_CTE + ", " + PERF_CHEAPEST_CTE + " "
                         + """
                         SELECT p.performanceID, e.title, v.venueName, pa.city, p.date, p.startTime,
-                               COALESCE(pa2.available, 0) AS available
+                               COALESCE(pa2.available, 0) AS available,
+                        """ + distance + " AS distanceKm, pc.cheapestPrice " + """
                         FROM performances p
                         JOIN events e ON e.eventID = p.eventID
                         JOIN venues v ON v.venueID = p.venueID
                         JOIN postal_areas pa ON pa.postalCode = v.postalCode
                         LEFT JOIN perf_avail pa2 ON pa2.performanceID = p.performanceID
+                        LEFT JOIN perf_cheapest pc ON pc.performanceID = p.performanceID
                         WHERE """ + UPCOMING + """
                           AND p.date BETWEEN ? AND ?
-                        HAVING available >= ?
-                        ORDER BY p.date, p.startTime, p.performanceID
-                        """;
+                        """);
+        bind.add(from);
+        bind.add(to);
+        if (mode.equals("POSTAL")) {
+            requireText(geography.postalCode(), "Postal code");
+            sql.append(" AND ").append(POSTAL_PREDICATE);
+            bind.add(normalizePostal(geography.postalCode()));
+        } else if (mode.equals("ADDRESS")) {
+            requireText(geography.address(), "Address");
+            sql.append(" AND LOWER(TRIM(v.address)) = LOWER(TRIM(?)) ");
+            bind.add(geography.address());
+        }
+        sql.append(" HAVING available >= ? ");
+        bind.add(minAvailable);
+        if (mode.equals("VICINITY")) {
+            sql.append("AND distanceKm <= ? ORDER BY ").append(orderByFor(geography.rankBy()));
+            bind.add(geography.radiusKm());
+        } else {
+            sql.append("ORDER BY p.date, p.startTime, p.performanceID");
+        }
         try (Connection c = DatabaseLogistics.getConnection();
-                PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setObject(1, from);
-            ps.setObject(2, to);
-            ps.setInt(3, minAvailable);
+                PreparedStatement ps = c.prepareStatement(sql.toString())) {
+            for (int i = 0; i < bind.size(); i++) {
+                ps.setObject(i + 1, bind.get(i));
+            }
             return collect(
                     ps,
                     rs -> List.of(
@@ -531,5 +585,17 @@ public final class JdbcQueryService implements QueryService {
         if (value == null || value.isBlank()) {
             throw new IllegalStateException(label + " is required.");
         }
+    }
+
+    private static void validateCoordinates(double lat, double lng, double radiusKm) {
+        if (!Double.isFinite(lat) || lat < -90 || lat > 90
+                || !Double.isFinite(lng) || lng < -180 || lng > 180
+                || !Double.isFinite(radiusKm) || radiusKm < 0) {
+            throw new IllegalStateException("Latitude, longitude and distance must be finite and in range.");
+        }
+    }
+
+    private static String normalizePostal(String value) {
+        return value.replaceAll("[\\s-]", "").toUpperCase(Locale.ROOT);
     }
 }

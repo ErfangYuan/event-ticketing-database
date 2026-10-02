@@ -10,13 +10,10 @@ import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import mytix.database.DatabaseLogistics;
-import mytix.nlp.NounPhraseExtractor;
-import mytix.nlp.OpenNlpNounPhraseExtractor;
+import mytix.database.query.ScalperPolicy;
 
 public final class JdbcReportService implements ReportService {
 
@@ -45,8 +42,6 @@ public final class JdbcReportService implements ReportService {
             )
             """;
 
-    private volatile NounPhraseExtractor nounPhraseExtractor;
-
     @Override
     public List<List<String>> runReport(int reportNumber, List<String> params) {
         List<String> p = params == null ? List.of() : params;
@@ -72,7 +67,7 @@ public final class JdbcReportService implements ReportService {
             case 1 -> r1Headers(p);
             case 2 -> r2Headers(p);
             case 3 -> r3Headers(p);
-            case 4 -> List.of("userID", "customer", "city", "purchased", "listed", "listedRatio");
+            case 4 -> List.of("userID", "customer", "country", "city", "purchased", "listed", "listedRatio");
             case 5 -> r5Headers(p);
             case 6 -> r6Headers(p);
             case 7 -> r7Headers(p);
@@ -86,7 +81,7 @@ public final class JdbcReportService implements ReportService {
 
     
     private List<List<String>> r1(List<String> p) {
-        String grain = arg(p, 0).trim().toLowerCase();
+        String grain = arg(p, 0).trim().toLowerCase(Locale.ROOT);
         boolean byVenue = grain.equals("venue");
         if (!byVenue && !grain.equals("city") && !grain.isEmpty()) {
             throw new IllegalArgumentException("R1 grain must be city or venue, got: " + arg(p, 0));
@@ -107,7 +102,7 @@ public final class JdbcReportService implements ReportService {
         }
 
         StringBuilder sql = new StringBuilder(
-                "SELECT pa.city" + (byVenue ? ", v.venueName" : "")
+                "SELECT pa.country, pa.city" + (byVenue ? ", v.venueID, v.venueName" : "")
                         + ", COUNT(t.ticketID) AS ticketsSold, COALESCE(SUM(t.faceValue), 0) AS grossRevenue "
                         + "FROM tickets t "
                         + "JOIN orders o ON o.orderID = t.orderID "
@@ -124,16 +119,19 @@ public final class JdbcReportService implements ReportService {
             sql.append("AND v.venueID = ? ");
             bind.add(venueID);
         }
-        sql.append("GROUP BY pa.city").append(byVenue ? ", v.venueName " : " ")
-                .append("ORDER BY grossRevenue DESC");
+        sql.append("GROUP BY pa.country, pa.city").append(byVenue ? ", v.venueID, v.venueName " : " ")
+                .append("ORDER BY grossRevenue DESC, pa.country, pa.city")
+                .append(byVenue ? ", v.venueID" : "");
 
         return queryDynamic(sql.toString(), bind, rs -> {
             List<String> row = new ArrayList<>();
+            row.add(rs.getString("country"));
             row.add(rs.getString("city"));
             if (byVenue) {
+                row.add(String.valueOf(rs.getInt("venueID")));
                 row.add(rs.getString("venueName"));
             }
-            row.add(String.valueOf(rs.getInt("ticketsSold")));
+            row.add(String.valueOf(rs.getLong("ticketsSold")));
             row.add(fmtMoney(rs.getBigDecimal("grossRevenue")));
             return row;
         });
@@ -142,15 +140,15 @@ public final class JdbcReportService implements ReportService {
     private List<String> r1Headers(List<String> p) {
         boolean byVenue = "VENUE".equalsIgnoreCase(arg(p, 0));
         return byVenue
-                ? List.of("city", "venue", "ticketsSold", "grossRevenue")
-                : List.of("city", "ticketsSold", "grossRevenue");
+                ? List.of("country", "city", "venueID", "venue", "ticketsSold", "grossRevenue")
+                : List.of("country", "city", "ticketsSold", "grossRevenue");
     }
 
     
 
     
     private List<List<String>> r2(List<String> p) {
-        String grain = arg(p, 0).isEmpty() ? "COUNTRY" : arg(p, 0).toUpperCase();
+        String grain = arg(p, 0).isEmpty() ? "COUNTRY" : arg(p, 0).toUpperCase(Locale.ROOT);
         boolean city = grain.equals("CITY") || grain.equals("VENUE");
         boolean venue = grain.equals("VENUE");
 
@@ -161,8 +159,8 @@ public final class JdbcReportService implements ReportService {
             groupBy.append(", pa.city");
         }
         if (venue) {
-            select.append(", v.venueName");
-            groupBy.append(", v.venueName");
+            select.append(", v.venueID, v.venueName");
+            groupBy.append(", v.venueID, v.venueName");
         }
         select.append(", COUNT(DISTINCT e.eventID) AS eventsCnt, COUNT(DISTINCT p.performanceID) AS perfsCnt ");
 
@@ -174,7 +172,8 @@ public final class JdbcReportService implements ReportService {
                 + "JOIN venues v ON v.venueID = p.venueID "
                 + "JOIN postal_areas pa ON pa.postalCode = v.postalCode "
                 + groupBy
-                + " ORDER BY sg.segmentName, g.genreName";
+                + " ORDER BY sg.segmentName, g.genreName, pa.country"
+                + (city ? ", pa.city" : "") + (venue ? ", v.venueID" : "");
 
         return queryDynamic(sql, List.of(), rs -> {
             List<String> row = new ArrayList<>();
@@ -185,6 +184,7 @@ public final class JdbcReportService implements ReportService {
                 row.add(rs.getString("city"));
             }
             if (venue) {
+                row.add(String.valueOf(rs.getInt("venueID")));
                 row.add(rs.getString("venueName"));
             }
             row.add(String.valueOf(rs.getInt("eventsCnt")));
@@ -194,12 +194,13 @@ public final class JdbcReportService implements ReportService {
     }
 
     private List<String> r2Headers(List<String> p) {
-        String grain = arg(p, 0).isEmpty() ? "COUNTRY" : arg(p, 0).toUpperCase();
+        String grain = arg(p, 0).isEmpty() ? "COUNTRY" : arg(p, 0).toUpperCase(Locale.ROOT);
         List<String> h = new ArrayList<>(List.of("segment", "genre", "country"));
         if (grain.equals("CITY") || grain.equals("VENUE")) {
             h.add("city");
         }
         if (grain.equals("VENUE")) {
+            h.add("venueID");
             h.add("venue");
         }
         h.add("events");
@@ -211,7 +212,7 @@ public final class JdbcReportService implements ReportService {
 
     
     private List<List<String>> r3(List<String> p) {
-        String scope = arg(p, 0).isEmpty() ? "OVERALL" : arg(p, 0).toUpperCase();
+        String scope = arg(p, 0).isEmpty() ? "OVERALL" : arg(p, 0).toUpperCase(Locale.ROOT);
         String dateFrom = argOrNull(p, 1);
         String dateTo = argOrNull(p, 2);
         boolean byCountry = scope.equals("COUNTRY") || scope.equals("CITY");
@@ -254,7 +255,7 @@ public final class JdbcReportService implements ReportService {
         String orderPrefix = byCity ? "country, city, " : byCountry ? "country, " : "";
         String sql = "WITH org_rev AS (" + cte + from + groupBy + ") "
                 + "SELECT *, RANK() OVER (" + partition + "ORDER BY revenue DESC) AS rnk FROM org_rev "
-                + "ORDER BY " + orderPrefix + "rnk";
+                + "ORDER BY " + orderPrefix + "rnk, organizerID";
 
         boolean fCountry = byCountry;
         boolean fCity = byCity;
@@ -275,7 +276,7 @@ public final class JdbcReportService implements ReportService {
     }
 
     private List<String> r3Headers(List<String> p) {
-        String scope = arg(p, 0).isEmpty() ? "OVERALL" : arg(p, 0).toUpperCase();
+        String scope = arg(p, 0).isEmpty() ? "OVERALL" : arg(p, 0).toUpperCase(Locale.ROOT);
         List<String> h = new ArrayList<>();
         if (scope.equals("COUNTRY") || scope.equals("CITY")) {
             h.add("country");
@@ -294,48 +295,21 @@ public final class JdbcReportService implements ReportService {
 
     
     private List<List<String>> r4(List<String> p) {
-        int windowDays = parseIntOrDefault(arg(p, 0), 365);
-        String sql =
-                """
-                WITH purchases AS (
-                  SELECT o.customerID, pa.city, t.ticketID
-                  FROM tickets t
-                  JOIN orders o ON o.orderID = t.orderID
-                  JOIN performances p ON p.performanceID = t.performanceID
-                  JOIN venues v ON v.venueID = p.venueID
-                  JOIN postal_areas pa ON pa.postalCode = v.postalCode
-                  WHERE o.orderTimestamp >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
-                ),
-                purchase_counts AS (
-                  SELECT customerID, city, COUNT(*) AS purchased FROM purchases GROUP BY customerID, city
-                ),
-                listed_counts AS (
-                  SELECT pu.customerID, pu.city, COUNT(DISTINCT rl.ticketID) AS listed
-                  FROM purchases pu
-                  JOIN resale_listings rl ON rl.ticketID = pu.ticketID AND rl.sellerID = pu.customerID
-                  GROUP BY pu.customerID, pu.city
-                )
-                SELECT u.userID, u.name, pc.city, pc.purchased, COALESCE(lc.listed, 0) AS listed
-                FROM purchase_counts pc
-                JOIN users u ON u.userID = pc.customerID
-                LEFT JOIN listed_counts lc ON lc.customerID = pc.customerID AND lc.city = pc.city
-                WHERE pc.purchased >= 10 AND (COALESCE(lc.listed, 0) / pc.purchased) > 0.5
-                ORDER BY (COALESCE(lc.listed, 0) / pc.purchased) DESC, pc.purchased DESC
-                """;
-        return queryDynamic(sql, List.of(windowDays), rs -> {
-            int purchased = rs.getInt("purchased");
-            int listed = rs.getInt("listed");
-            BigDecimal ratio = purchased == 0
-                    ? BigDecimal.ZERO
-                    : BigDecimal.valueOf(listed).divide(BigDecimal.valueOf(purchased), 2, RoundingMode.HALF_UP);
-            return List.of(
+        boolean annual = arg(p, 0).isEmpty();
+        String lowerBound = annual ? ScalperPolicy.ANNUAL_BOUND : "DATE_SUB(CURRENT_TIMESTAMP, INTERVAL ? DAY)";
+        List<Object> bind = annual ? List.of() : List.of(positiveInteger(arg(p, 0), "window days", null));
+        String sql = "SELECT u.userID,u.name,co.country,co.city,co.purchased,co.listed,"
+                + "co.listed/co.purchased AS listedRatio FROM (" + ScalperPolicy.cohortSql(lowerBound) + ") co "
+                + "JOIN users u ON u.userID=co.customerID WHERE co.purchased>=10 AND co.listed*2>co.purchased "
+                + "ORDER BY listedRatio DESC,co.purchased DESC,co.country,co.city,u.userID";
+        return queryDynamic(sql, bind, rs -> List.of(
                     String.valueOf(rs.getInt("userID")),
                     rs.getString("name"),
+                    rs.getString("country"),
                     rs.getString("city"),
-                    String.valueOf(purchased),
-                    String.valueOf(listed),
-                    ratio.toPlainString());
-        });
+                    String.valueOf(rs.getLong("purchased")),
+                    String.valueOf(rs.getLong("listed")),
+                    fmtMoney(rs.getBigDecimal("listedRatio"))));
     }
 
     
@@ -350,24 +324,32 @@ public final class JdbcReportService implements ReportService {
             String sql =
                     """
                     WITH order_city AS (
-                      SELECT DISTINCT o.orderID, o.customerID, pa.city
+                      SELECT o.orderID, o.customerID, o.orderTimestamp, pa.country, pa.city
                       FROM orders o
-                      JOIN tickets t ON t.orderID = o.orderID
-                      JOIN performances p ON p.performanceID = t.performanceID
+                      JOIN performances p ON p.performanceID = o.performanceID
                       JOIN venues v ON v.venueID = p.venueID
                       JOIN postal_areas pa ON pa.postalCode = v.postalCode
-                      WHERE DATE(o.orderTimestamp) BETWEEN ? AND ?
+                    ),
+                    annual_eligible AS (
+                      SELECT customerID,country,city FROM order_city
+                      WHERE orderTimestamp>=DATE_SUB(CURRENT_TIMESTAMP,INTERVAL 1 YEAR)
+                        AND orderTimestamp<=CURRENT_TIMESTAMP
+                      GROUP BY customerID,country,city
+                      HAVING COUNT(*) >= 2
                     ),
                     cust_city_counts AS (
-                      SELECT customerID, city, COUNT(*) AS cnt FROM order_city GROUP BY customerID, city
-                      HAVING COUNT(*) >= 2
+                      SELECT oc.customerID,oc.country,oc.city,COUNT(*) AS cnt FROM order_city oc
+                      JOIN annual_eligible ae ON ae.customerID=oc.customerID AND ae.country=oc.country AND ae.city=oc.city
+                      WHERE DATE(oc.orderTimestamp) BETWEEN ? AND ?
+                      GROUP BY oc.customerID,oc.country,oc.city
                     )
-                    SELECT ccc.city, ccc.cnt, u.userID, u.name,
-                      RANK() OVER (PARTITION BY ccc.city ORDER BY ccc.cnt DESC) AS rnk
+                    SELECT ccc.country,ccc.city,ccc.cnt,u.userID,u.name,
+                      RANK() OVER (PARTITION BY ccc.country,ccc.city ORDER BY ccc.cnt DESC) AS rnk
                     FROM cust_city_counts ccc JOIN users u ON u.userID = ccc.customerID
-                    ORDER BY ccc.city, rnk
+                    ORDER BY ccc.country,ccc.city,rnk,u.userID
                     """;
             return queryDynamic(sql, List.of(dateFrom, dateTo), rs -> List.of(
+                    rs.getString("country"),
                     rs.getString("city"),
                     String.valueOf(rs.getInt("rnk")),
                     String.valueOf(rs.getInt("userID")),
@@ -383,7 +365,7 @@ public final class JdbcReportService implements ReportService {
                 )
                 SELECT co.cnt, u.userID, u.name, RANK() OVER (ORDER BY co.cnt DESC) AS rnk
                 FROM cust_orders co JOIN users u ON u.userID = co.customerID
-                ORDER BY rnk
+                ORDER BY rnk,u.userID
                 """;
         return queryDynamic(sql, List.of(dateFrom, dateTo), rs -> List.of(
                 String.valueOf(rs.getInt("rnk")),
@@ -395,7 +377,7 @@ public final class JdbcReportService implements ReportService {
     private List<String> r5Headers(List<String> p) {
         String mode = normalizeMode(arg(p, 0), "OVERALL");
         return mode.equals("PER_CITY")
-                ? List.of("city", "rank", "userID", "customer", "orderCount")
+                ? List.of("country", "city", "rank", "userID", "customer", "orderCount")
                 : List.of("rank", "userID", "customer", "orderCount");
     }
 
@@ -403,19 +385,26 @@ public final class JdbcReportService implements ReportService {
 
     
     private List<List<String>> r6(List<String> p) {
-        String mode = arg(p, 0).isEmpty() ? "BOTH" : arg(p, 0).toUpperCase();
-        int windowDays = parseIntOrDefault(arg(p, 1), 365);
+        String mode = arg(p, 0).isEmpty() ? "BOTH" : arg(p, 0).toUpperCase(Locale.ROOT);
         int limit = parseIntOrDefault(arg(p, 2), 10);
+        boolean annual = arg(p, 1).isEmpty();
+        String lowerBound = annual ? ScalperPolicy.ANNUAL_BOUND : "DATE_SUB(CURRENT_TIMESTAMP,INTERVAL ? DAY)";
+        List<Object> bind = new ArrayList<>();
+        if (!annual) {
+            bind.add(positiveInteger(arg(p, 1), "window days", null));
+        }
+        bind.add(limit);
         boolean both = mode.equals("BOTH");
 
         List<List<String>> rows = new ArrayList<>();
         if (mode.equals("CUSTOMERS") || both) {
             String sql =
                     "SELECT u.userID, u.name, COUNT(*) AS cancelledCount "
-                            + "FROM tickets t JOIN users u ON u.userID = t.currentOwnerID "
-                            + "WHERE t.status = 'CANCELLED' AND t.cancelledAt >= DATE_SUB(NOW(), INTERVAL ? DAY) "
-                            + "GROUP BY u.userID, u.name ORDER BY cancelledCount DESC LIMIT ?";
-            rows.addAll(queryDynamic(sql, List.of(windowDays, limit), rs -> {
+                            + "FROM tickets t JOIN users u ON u.userID = t.cancelledBy "
+                            + "WHERE t.cancellationType = 'CUSTOMER' AND t.cancelledAt >= " + lowerBound
+                            + " AND t.cancelledAt<=CURRENT_TIMESTAMP "
+                            + "GROUP BY u.userID, u.name ORDER BY cancelledCount DESC,u.userID LIMIT ?";
+            rows.addAll(queryDynamic(sql, bind, rs -> {
                 List<String> row = new ArrayList<>();
                 if (both) {
                     row.add("CUSTOMER");
@@ -431,9 +420,10 @@ public final class JdbcReportService implements ReportService {
                     "SELECT u.userID, u.name, COUNT(*) AS cancelledCount "
                             + "FROM performances p JOIN events e ON e.eventID = p.eventID "
                             + "JOIN users u ON u.userID = e.organizerID "
-                            + "WHERE p.status = 'CANCELLED' AND p.cancelledAt >= DATE_SUB(NOW(), INTERVAL ? DAY) "
-                            + "GROUP BY u.userID, u.name ORDER BY cancelledCount DESC LIMIT ?";
-            rows.addAll(queryDynamic(sql, List.of(windowDays, limit), rs -> {
+                            + "WHERE p.status = 'CANCELLED' AND p.cancelledAt >= " + lowerBound
+                            + " AND p.cancelledAt<=CURRENT_TIMESTAMP "
+                            + "GROUP BY u.userID, u.name ORDER BY cancelledCount DESC,u.userID LIMIT ?";
+            rows.addAll(queryDynamic(sql, bind, rs -> {
                 List<String> row = new ArrayList<>();
                 if (both) {
                     row.add("ORGANIZER");
@@ -448,7 +438,7 @@ public final class JdbcReportService implements ReportService {
     }
 
     private List<String> r6Headers(List<String> p) {
-        String mode = arg(p, 0).isEmpty() ? "BOTH" : arg(p, 0).toUpperCase();
+        String mode = arg(p, 0).isEmpty() ? "BOTH" : arg(p, 0).toUpperCase(Locale.ROOT);
         List<String> h = new ArrayList<>();
         if (mode.equals("BOTH")) {
             h.add("type");
@@ -463,7 +453,7 @@ public final class JdbcReportService implements ReportService {
 
     
     private List<List<String>> r7(List<String> p) {
-        String mode = arg(p, 0).isEmpty() ? "PERF" : arg(p, 0).toUpperCase();
+        String mode = arg(p, 0).isEmpty() ? "PERF" : arg(p, 0).toUpperCase(Locale.ROOT);
         return switch (mode) {
             case "TIER" -> r7Tier(argOrNull(p, 1));
             case "MONTH" -> r7Month(arg(p, 1), argOrNull(p, 2));
@@ -476,7 +466,8 @@ public final class JdbcReportService implements ReportService {
                 "WITH " + PERF_CAPACITY_CTE + ", " + PERF_SOLD_CTE + " "
                         + """
                         SELECT p.performanceID, e.title, pa.city,
-                               (pc.totalCapacity - pc.totalBlocked) AS sellable, COALESCE(ps.soldCnt, 0) AS sold
+                               (pc.totalCapacity - pc.totalBlocked) AS sellable, COALESCE(ps.soldCnt, 0) AS sold,
+                               100.0 * COALESCE(ps.soldCnt, 0) / NULLIF(pc.totalCapacity - pc.totalBlocked, 0) AS sellThroughPct
                         FROM performances p
                         JOIN events e ON e.eventID = p.eventID
                         JOIN venues v ON v.venueID = p.venueID
@@ -491,15 +482,15 @@ public final class JdbcReportService implements ReportService {
         }
         sql.append("ORDER BY p.date DESC, p.performanceID DESC");
         return queryDynamic(sql.toString(), bind, rs -> {
-            int sellable = rs.getInt("sellable");
-            int sold = rs.getInt("sold");
+            long sellable = rs.getLong("sellable");
+            long sold = rs.getLong("sold");
             return List.of(
                     String.valueOf(rs.getInt("performanceID")),
                     rs.getString("title"),
                     rs.getString("city"),
                     String.valueOf(sellable),
                     String.valueOf(sold),
-                    pct(sold, sellable));
+                    fmtPercent(rs.getBigDecimal("sellThroughPct")));
         });
     }
 
@@ -528,7 +519,8 @@ public final class JdbcReportService implements ReportService {
                   LEFT JOIN tickets t ON t.performanceID = pst.performanceID AND t.sectionID = pst.sectionID AND t.status = 'ACTIVE'
                   GROUP BY pst.performanceID, pt.tierID
                 )
-                SELECT tc.performanceID, tc.tierName, (tc.capacity - tc.blocked) AS sellable, COALESCE(ts.soldCnt, 0) AS sold
+                SELECT tc.performanceID, tc.tierName, (tc.capacity - tc.blocked) AS sellable, COALESCE(ts.soldCnt, 0) AS sold,
+                       100.0 * COALESCE(ts.soldCnt, 0) / NULLIF(tc.capacity - tc.blocked, 0) AS sellThroughPct
                 FROM tier_capacity tc
                 LEFT JOIN tier_sold ts ON ts.performanceID = tc.performanceID AND ts.tierID = tc.tierID
                 """);
@@ -539,14 +531,14 @@ public final class JdbcReportService implements ReportService {
         }
         sql.append("ORDER BY tc.performanceID, tc.tierName");
         return queryDynamic(sql.toString(), bind, rs -> {
-            int sellable = rs.getInt("sellable");
-            int sold = rs.getInt("sold");
+            long sellable = rs.getLong("sellable");
+            long sold = rs.getLong("sold");
             return List.of(
                     String.valueOf(rs.getInt("performanceID")),
                     rs.getString("tierName"),
                     String.valueOf(sellable),
                     String.valueOf(sold),
-                    pct(sold, sellable));
+                    fmtPercent(rs.getBigDecimal("sellThroughPct")));
         });
     }
 
@@ -557,6 +549,7 @@ public final class JdbcReportService implements ReportService {
                         + """
                         SELECT p.performanceID, e.title, pa.city,
                                (pc.totalCapacity - pc.totalBlocked) AS sellable, COALESCE(ps.soldCnt, 0) AS sold,
+                               100.0 * COALESCE(ps.soldCnt, 0) / NULLIF(pc.totalCapacity - pc.totalBlocked, 0) AS sellThroughPct,
                                CASE WHEN COALESCE(ps.soldCnt, 0) = (pc.totalCapacity - pc.totalBlocked)
                                     THEN 'SOLD_OUT' ELSE 'LOW' END AS flag
                         FROM performances p
@@ -577,21 +570,21 @@ public final class JdbcReportService implements ReportService {
         }
         sql.append("ORDER BY p.date, p.performanceID");
         return queryDynamic(sql.toString(), bind, rs -> {
-            int sellable = rs.getInt("sellable");
-            int sold = rs.getInt("sold");
+            long sellable = rs.getLong("sellable");
+            long sold = rs.getLong("sold");
             return List.of(
                     String.valueOf(rs.getInt("performanceID")),
                     rs.getString("title"),
                     rs.getString("city"),
                     String.valueOf(sellable),
                     String.valueOf(sold),
-                    pct(sold, sellable),
+                    fmtPercent(rs.getBigDecimal("sellThroughPct")),
                     rs.getString("flag"));
         });
     }
 
     private List<String> r7Headers(List<String> p) {
-        String mode = arg(p, 0).isEmpty() ? "PERF" : arg(p, 0).toUpperCase();
+        String mode = arg(p, 0).isEmpty() ? "PERF" : arg(p, 0).toUpperCase(Locale.ROOT);
         return switch (mode) {
             case "TIER" -> List.of("performanceID", "tier", "sellable", "sold", "sellThroughPct");
             case "MONTH" -> List.of("performanceID", "event", "city", "sellable", "sold", "sellThroughPct", "flag");
@@ -603,7 +596,7 @@ public final class JdbcReportService implements ReportService {
 
     
     private List<List<String>> r8(List<String> p) {
-        String mode = arg(p, 0).isEmpty() ? "STATS" : arg(p, 0).toUpperCase();
+        String mode = arg(p, 0).isEmpty() ? "STATS" : arg(p, 0).toUpperCase(Locale.ROOT);
         if (mode.equals("TOP10")) {
             LocalDate from = LocalDate.parse(arg(p, 1));
             LocalDate to = LocalDate.parse(arg(p, 2));
@@ -624,10 +617,9 @@ public final class JdbcReportService implements ReportService {
                 """
                 SELECT e.eventID, e.title,
                   SUM(CASE WHEN rl.status = 'SOLD' THEN 1 ELSE 0 END) AS soldCount,
-                  AVG(CASE WHEN rl.status = 'SOLD' THEN (rl.listingPrice / NULLIF(t.faceValue, 0) - 1) ELSE NULL END) AS avgMarkup,
-                  COUNT(rl.listingID) AS listingCount,
-                  SUM(CASE WHEN rl.listingPrice = ROUND(t.faceValue * e.resaleCapRatio, 2)
-                      THEN 1 ELSE 0 END) AS atCapCount
+                  100.0 * AVG(CASE WHEN rl.status = 'SOLD' THEN (rl.listingPrice / NULLIF(t.faceValue, 0) - 1) ELSE NULL END) AS avgMarkupPct,
+                  SUM(CASE WHEN rl.listingPrice = ROUND(t.faceValue * rl.capRatio, 2)
+                      THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(rl.listingID), 0) AS atCapPct
                 FROM events e
                 LEFT JOIN performances p ON p.eventID = e.eventID
                 LEFT JOIN tickets t ON t.performanceID = p.performanceID
@@ -636,25 +628,17 @@ public final class JdbcReportService implements ReportService {
                 """;
         return queryDynamic(sql, List.of(), rs -> {
             long soldCount = rs.getLong("soldCount");
-            long listingCount = rs.getLong("listingCount");
-            long atCapCount = rs.getLong("atCapCount");
-            BigDecimal avgMarkup = rs.getBigDecimal("avgMarkup");
-            String markupPct = avgMarkup == null
-                    ? "n/a"
-                    : avgMarkup.multiply(BigDecimal.valueOf(100)).setScale(2, RoundingMode.HALF_UP).toPlainString()
-                            + "%";
-            String atCapPct = pct(atCapCount, listingCount);
             return List.of(
                     String.valueOf(rs.getInt("eventID")),
                     rs.getString("title"),
                     String.valueOf(soldCount),
-                    markupPct,
-                    atCapPct);
+                    fmtPercent(rs.getBigDecimal("avgMarkupPct")),
+                    fmtPercent(rs.getBigDecimal("atCapPct")));
         });
     }
 
     private List<String> r8Headers(List<String> p) {
-        String mode = arg(p, 0).isEmpty() ? "STATS" : arg(p, 0).toUpperCase();
+        String mode = arg(p, 0).isEmpty() ? "STATS" : arg(p, 0).toUpperCase(Locale.ROOT);
         return mode.equals("TOP10")
                 ? List.of("eventID", "event", "resaleCount")
                 : List.of("eventID", "event", "resaleCount", "avgMarkupPct", "atCapPct");
@@ -666,60 +650,34 @@ public final class JdbcReportService implements ReportService {
     private List<List<String>> r9(List<String> p) {
         String eventFilter = argOrNull(p, 0);
         StringBuilder sql = new StringBuilder(
-                "SELECT e.eventID, e.title, r.commentText "
-                        + "FROM reviews r "
-                        + "JOIN performances p ON p.performanceID = r.performanceID "
-                        + "JOIN events e ON e.eventID = p.eventID ");
+                """
+                WITH phrase_counts AS (
+                  SELECT p.eventID,np.nounPhrase,COUNT(*) AS occurrences
+                  FROM review_noun_phrases np
+                  JOIN reviews r ON r.reviewID=np.reviewID
+                  JOIN performances p ON p.performanceID=r.performanceID
+                """);
         List<Object> bind = new ArrayList<>();
         if (eventFilter != null) {
-            sql.append("WHERE e.eventID = ? ");
+            sql.append("WHERE p.eventID = ? ");
             bind.add(Integer.parseInt(eventFilter));
         }
-        sql.append("ORDER BY e.eventID");
-
-        Map<Integer, String> eventTitles = new LinkedHashMap<>();
-        Map<Integer, Map<String, Integer>> phraseCounts = new LinkedHashMap<>();
-        NounPhraseExtractor extractor = extractor();
-
-        try (Connection c = DatabaseLogistics.getConnection();
-                PreparedStatement ps = c.prepareStatement(sql.toString())) {
-            bindParams(ps, bind);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    int eventID = rs.getInt("eventID");
-                    String title = rs.getString("title");
-                    String comment = rs.getString("commentText");
-                    eventTitles.putIfAbsent(eventID, title);
-                    Map<String, Integer> counts = phraseCounts.computeIfAbsent(eventID, k -> new LinkedHashMap<>());
-                    for (String phrase : extractor.extractNounPhrases(comment)) {
-                        String cleaned = phrase == null ? "" : phrase.trim().replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
-                        if (cleaned.length() < 2) {
-                            continue;
-                        }
-                        counts.merge(cleaned, 1, Integer::sum);
-                    }
-                }
-            }
-        } catch (SQLException e) {
-            throw new IllegalStateException("r9 (noun phrases) failed: " + e.getMessage(), e);
-        }
-
-        List<List<String>> rows = new ArrayList<>();
-        for (Map.Entry<Integer, Map<String, Integer>> entry : phraseCounts.entrySet()) {
-            String title = eventTitles.get(entry.getKey());
-            entry.getValue().entrySet().stream()
-                    .sorted(Map.Entry.<String, Integer>comparingByValue().reversed().thenComparing(Map.Entry.comparingByKey()))
-                    .limit(10)
-                    .forEach(pe -> rows.add(List.of(title, pe.getKey(), String.valueOf(pe.getValue()))));
-        }
-        return rows;
-    }
-
-    private synchronized NounPhraseExtractor extractor() {
-        if (nounPhraseExtractor == null) {
-            nounPhraseExtractor = new OpenNlpNounPhraseExtractor();
-        }
-        return nounPhraseExtractor;
+        sql.append("""
+                  GROUP BY p.eventID,np.nounPhrase
+                ), ranked AS (
+                  SELECT eventID,nounPhrase,occurrences,
+                         ROW_NUMBER() OVER (PARTITION BY eventID ORDER BY occurrences DESC,nounPhrase) AS phraseRank
+                  FROM phrase_counts
+                )
+                SELECT /*+ SET_VAR(max_sort_length=65535) SET_VAR(sort_buffer_size=1048576) */
+                       e.title,r.nounPhrase,r.occurrences
+                FROM ranked r JOIN events e ON e.eventID=r.eventID
+                WHERE r.phraseRank<=10 ORDER BY e.eventID,r.phraseRank
+                """);
+        // TEXT comparisons must include the entire possible 65535-byte phrase;
+        // statement-scoped hints avoid changing persistent/session configuration.
+        return queryDynamic(sql.toString(), bind, rs -> List.of(
+                rs.getString("title"), rs.getString("nounPhrase"), String.valueOf(rs.getLong("occurrences"))));
     }
 
     
@@ -846,15 +804,8 @@ public final class JdbcReportService implements ReportService {
         return positiveInteger(raw == null ? "" : raw.trim(), "value", def);
     }
 
-    private static String pct(long numerator, long denominator) {
-        if (denominator <= 0) {
-            return "n/a";
-        }
-        BigDecimal ratio = BigDecimal.valueOf(numerator)
-                .divide(BigDecimal.valueOf(denominator), 4, RoundingMode.HALF_UP)
-                .multiply(BigDecimal.valueOf(100))
-                .setScale(2, RoundingMode.HALF_UP);
-        return ratio.toPlainString() + "%";
+    private static String fmtPercent(BigDecimal value) {
+        return value == null ? "n/a" : value.setScale(2, RoundingMode.HALF_UP).toPlainString() + "%";
     }
 
     private static String fmtMoney(BigDecimal v) {

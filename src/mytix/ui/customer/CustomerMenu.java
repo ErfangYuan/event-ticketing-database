@@ -267,10 +267,10 @@ public final class CustomerMenu extends AbstractMenu {
     private void viewTickets() {
         try {
             int customerID = ctx.session().getUserID();
-            List<List<String>> tickets = ctx.catalog().listCustomerTickets(customerID);
+            List<List<String>> tickets = ctx.catalog().listCustomerPurchaseHistory(customerID);
             if (!Tabulator.printTableRequireRows(
                     "My Tickets / Order History",
-                    List.of("ticketID", "event", "date", "section", "seat", "status", "faceValue"),
+                    List.of("orderID", "ticketID", "event", "date", "section", "seat", "status", "paid", "ownership"),
                     tickets,
                     "No tickets to view.")) {
                 io.pause();
@@ -283,7 +283,7 @@ public final class CustomerMenu extends AbstractMenu {
                     Tabulator.printTable(
                             "Ticket Detail",
                             List.of("ticketID", "ownershipCount", "activeListing"),
-                            ctx.catalog().ticketDetail(ticketID));
+                            ctx.catalog().ticketDetail(customerID, ticketID));
                 } catch (NumberFormatException e) {
                     System.out.println("Invalid ticketID.");
                 }

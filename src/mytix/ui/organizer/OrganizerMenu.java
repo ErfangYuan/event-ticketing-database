@@ -133,9 +133,14 @@ public final class OrganizerMenu extends AbstractMenu {
         if (genreID == null) {
             return;
         }
+        if (segmentGenres.stream().noneMatch(row -> row.get(0).equals(String.valueOf(genreID)))) {
+            System.out.println("Genre must belong to the selected segment. Aborting.");
+            io.pause();
+            return;
+        }
 
         String title = io.promptNonEmpty("Title: ");
-        BigDecimal resaleCapRatio = promptDecimalOrDefault("resaleCapRatio", new BigDecimal("2.00"));
+        BigDecimal resaleCapRatio = promptDecimalOrDefault("resaleCapRatio", new BigDecimal("1.20"));
 
         if (!Tabulator.printTableRequireRows(
                 "Artists",
@@ -243,14 +248,14 @@ public final class OrganizerMenu extends AbstractMenu {
             }
             System.out.println("Prefilled " + tierPrices.size() + " tier(s) from the toolkit.");
         } else {
-            System.out.println("Manual tier entry (need >= 2). Enter blank tierName to stop.");
+            System.out.println("Manual tier entry (need >= 1). Enter blank tierName to stop.");
             while (true) {
                 String tierName = io.prompt("tierName (blank to stop): ");
                 if (tierName.isEmpty()) {
-                    if (tierPrices.size() >= 2) {
+                    if (!tierPrices.isEmpty()) {
                         break;
                     }
-                    System.out.println("At least 2 tiers are required before stopping.");
+                    System.out.println("At least one tier is required before stopping.");
                     continue;
                 }
                 BigDecimal price = promptDecimalOrDefault("price for " + tierName, null);
@@ -266,8 +271,8 @@ public final class OrganizerMenu extends AbstractMenu {
             estimateDeltaRevFlow(venueID, suggestion);
         }
 
-        if (tierPrices.size() < 2) {
-            System.out.println("At least 2 price tiers are required. Aborting.");
+        if (tierPrices.isEmpty()) {
+            System.out.println("At least one price tier is required. Aborting.");
             io.pause();
             return;
         }
@@ -374,7 +379,7 @@ public final class OrganizerMenu extends AbstractMenu {
 
         if (!Tabulator.printTableRequireRows(
                 "Tiers",
-                List.of("tierID", "tierName", "price", "activeTickets"),
+                List.of("tierID", "tierName", "price", "historicalTickets"),
                 ctx.catalog().listTiers(performanceID),
                 "No tiers for this performance.")) {
             io.pause();
@@ -395,7 +400,7 @@ public final class OrganizerMenu extends AbstractMenu {
         if (ok) {
             System.out.println("Tier price updated.");
         } else {
-            System.out.println("Refused: this tier still has ACTIVE tickets sold.");
+            System.out.println("Refused: this tier has a sale in its history.");
         }
         io.pause();
     }

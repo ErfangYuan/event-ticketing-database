@@ -1,6 +1,6 @@
 # English noun phrase models
 
-R9 uses Apache OpenNLP 1.9.4 with four English models. From the repository root, run this command using JDK 17+ on Windows, Linux, or macOS:
+Review creation and noun-phrase projection loading use Apache OpenNLP 1.9.4 with four English models. From the repository root, run this command using JDK 17+ on Windows, Linux, or macOS:
 
 ```text
 java scripts/InstallNlpModels.java
@@ -26,6 +26,10 @@ For an offline machine, copy the four verified files from a prepared installatio
 | en-chunker.bin | Phrase chunking, including noun phrases |
 
 These models were created in the OpenNLP 1.5.0 format and are compatible with this project's OpenNLP 1.9.4 API. All four must be installed together. The newer Universal Dependencies POS models use a different tag set; renaming them to these legacy filenames does not establish compatibility with the phrase chunker. English comments are supported; the statistical models can misclassify punctuation, unusual language, or short fragments.
+
+`ReviewNounPhraseProjection.replace(connection, reviewID, comment)` runs inside the caller's review transaction. It extracts and normalizes each occurrence (Unicode NFC, lowercase and whitespace), retains duplicates and replaces that review's projection. It does not commit. Missing models or extraction/storage errors must roll back the whole review operation. Dataset loaders use the same helper.
+
+R9 reads `review_noun_phrases`; SQL performs occurrence counts, event grouping and deterministic top-ten ranking. Report reads need no model files and never repair or populate projections. Long phrases are stored without truncation up to the MySQL TEXT byte limit. Statement-scoped sorting hints cover full TEXT values, because MySQL's default comparison prefix can otherwise merge long values that share a prefix; see [MySQL max_sort_length](https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_max_sort_length).
 
 ## Sources and licenses
 
