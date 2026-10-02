@@ -7,9 +7,12 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.LocalDate;
+import java.time.YearMonth;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import mytix.database.DatabaseLogistics;
 import mytix.nlp.NounPhraseExtractor;
@@ -47,6 +50,7 @@ public final class JdbcReportService implements ReportService {
     @Override
     public List<List<String>> runReport(int reportNumber, List<String> params) {
         List<String> p = params == null ? List.of() : params;
+        validateParameters(reportNumber, p);
         return switch (reportNumber) {
             case 1 -> r1(p);
             case 2 -> r2(p);
@@ -547,23 +551,26 @@ public final class JdbcReportService implements ReportService {
     }
 
     private List<List<String>> r7Month(String yearMonth, String cityOrNull) {
-        if (yearMonth == null || yearMonth.isBlank()) {
-            throw new IllegalArgumentException("month (YYYY-MM) is required for R7 MONTH mode.");
-        }
+        YearMonth month = YearMonth.parse(yearMonth);
         StringBuilder sql = new StringBuilder(
                 "WITH " + PERF_CAPACITY_CTE + ", " + PERF_SOLD_CTE + " "
                         + """
                         SELECT p.performanceID, e.title, pa.city,
-                               (pc.totalCapacity - pc.totalBlocked) AS sellable, COALESCE(ps.soldCnt, 0) AS sold
+                               (pc.totalCapacity - pc.totalBlocked) AS sellable, COALESCE(ps.soldCnt, 0) AS sold,
+                               CASE WHEN COALESCE(ps.soldCnt, 0) = (pc.totalCapacity - pc.totalBlocked)
+                                    THEN 'SOLD_OUT' ELSE 'LOW' END AS flag
                         FROM performances p
                         JOIN events e ON e.eventID = p.eventID
                         JOIN venues v ON v.venueID = p.venueID
                         JOIN postal_areas pa ON pa.postalCode = v.postalCode
                         JOIN perf_capacity pc ON pc.performanceID = p.performanceID
                         LEFT JOIN perf_sold ps ON ps.performanceID = p.performanceID
-                        WHERE DATE_FORMAT(p.date, '%Y-%m') = ?
+                        WHERE p.date >= ? AND p.date <= ? AND p.status = 'SCHEDULED'
+                          AND (pc.totalCapacity - pc.totalBlocked) > 0
+                          AND (COALESCE(ps.soldCnt, 0) = (pc.totalCapacity - pc.totalBlocked)
+                               OR COALESCE(ps.soldCnt, 0) * 4 < (pc.totalCapacity - pc.totalBlocked))
                         """);
-        List<Object> bind = new ArrayList<>(List.of(yearMonth));
+        List<Object> bind = new ArrayList<>(List.of(month.atDay(1), month.atEndOfMonth()));
         if (cityOrNull != null) {
             sql.append("AND pa.city = ? ");
             bind.add(cityOrNull);
@@ -572,14 +579,6 @@ public final class JdbcReportService implements ReportService {
         return queryDynamic(sql.toString(), bind, rs -> {
             int sellable = rs.getInt("sellable");
             int sold = rs.getInt("sold");
-            String flag = "";
-            if (sellable > 0) {
-                if (sold >= sellable) {
-                    flag = "SOLD_OUT";
-                } else if ((double) sold / sellable < 0.25) {
-                    flag = "LOW";
-                }
-            }
             return List.of(
                     String.valueOf(rs.getInt("performanceID")),
                     rs.getString("title"),
@@ -587,7 +586,7 @@ public final class JdbcReportService implements ReportService {
                     String.valueOf(sellable),
                     String.valueOf(sold),
                     pct(sold, sellable),
-                    flag);
+                    rs.getString("flag"));
         });
     }
 
@@ -609,40 +608,42 @@ public final class JdbcReportService implements ReportService {
             LocalDate from = LocalDate.parse(arg(p, 1));
             LocalDate to = LocalDate.parse(arg(p, 2));
             String sql =
-                    "SELECT e.eventID, e.title, COUNT(*) AS listingVolume "
+                    "SELECT e.eventID, e.title, COUNT(*) AS resaleCount "
                             + "FROM events e JOIN performances p ON p.eventID = e.eventID "
                             + "JOIN tickets t ON t.performanceID = p.performanceID "
                             + "JOIN resale_listings rl ON rl.ticketID = t.ticketID "
-                            + "WHERE DATE(rl.createdAt) BETWEEN ? AND ? "
-                            + "GROUP BY e.eventID, e.title ORDER BY listingVolume DESC LIMIT 10";
+                            + "WHERE rl.status = 'SOLD' AND DATE(rl.soldAt) BETWEEN ? AND ? "
+                            + "GROUP BY e.eventID, e.title ORDER BY resaleCount DESC, e.eventID LIMIT 10";
             return queryDynamic(sql, List.of(from, to), rs -> List.of(
                     String.valueOf(rs.getInt("eventID")),
                     rs.getString("title"),
-                    String.valueOf(rs.getInt("listingVolume"))));
+                    String.valueOf(rs.getLong("resaleCount"))));
         }
 
         String sql =
                 """
                 SELECT e.eventID, e.title,
                   SUM(CASE WHEN rl.status = 'SOLD' THEN 1 ELSE 0 END) AS soldCount,
-                  AVG(CASE WHEN rl.status = 'SOLD' THEN (rl.listingPrice / t.faceValue - 1) ELSE NULL END) AS avgMarkup,
-                  SUM(CASE WHEN rl.status = 'SOLD' AND ABS(rl.listingPrice - t.faceValue * e.resaleCapRatio) < 0.01
+                  AVG(CASE WHEN rl.status = 'SOLD' THEN (rl.listingPrice / NULLIF(t.faceValue, 0) - 1) ELSE NULL END) AS avgMarkup,
+                  COUNT(rl.listingID) AS listingCount,
+                  SUM(CASE WHEN rl.listingPrice = ROUND(t.faceValue * e.resaleCapRatio, 2)
                       THEN 1 ELSE 0 END) AS atCapCount
                 FROM events e
-                JOIN performances p ON p.eventID = e.eventID
-                JOIN tickets t ON t.performanceID = p.performanceID
-                JOIN resale_listings rl ON rl.ticketID = t.ticketID
-                GROUP BY e.eventID, e.title ORDER BY soldCount DESC
+                LEFT JOIN performances p ON p.eventID = e.eventID
+                LEFT JOIN tickets t ON t.performanceID = p.performanceID
+                LEFT JOIN resale_listings rl ON rl.ticketID = t.ticketID
+                GROUP BY e.eventID, e.title ORDER BY soldCount DESC, e.eventID
                 """;
         return queryDynamic(sql, List.of(), rs -> {
-            int soldCount = rs.getInt("soldCount");
-            int atCapCount = rs.getInt("atCapCount");
+            long soldCount = rs.getLong("soldCount");
+            long listingCount = rs.getLong("listingCount");
+            long atCapCount = rs.getLong("atCapCount");
             BigDecimal avgMarkup = rs.getBigDecimal("avgMarkup");
             String markupPct = avgMarkup == null
                     ? "n/a"
                     : avgMarkup.multiply(BigDecimal.valueOf(100)).setScale(2, RoundingMode.HALF_UP).toPlainString()
                             + "%";
-            String atCapPct = soldCount == 0 ? "n/a" : pct(atCapCount, soldCount);
+            String atCapPct = pct(atCapCount, listingCount);
             return List.of(
                     String.valueOf(rs.getInt("eventID")),
                     rs.getString("title"),
@@ -655,7 +656,7 @@ public final class JdbcReportService implements ReportService {
     private List<String> r8Headers(List<String> p) {
         String mode = arg(p, 0).isEmpty() ? "STATS" : arg(p, 0).toUpperCase();
         return mode.equals("TOP10")
-                ? List.of("eventID", "event", "listingVolume")
+                ? List.of("eventID", "event", "resaleCount")
                 : List.of("eventID", "event", "resaleCount", "avgMarkupPct", "atCapPct");
     }
 
@@ -691,7 +692,7 @@ public final class JdbcReportService implements ReportService {
                     eventTitles.putIfAbsent(eventID, title);
                     Map<String, Integer> counts = phraseCounts.computeIfAbsent(eventID, k -> new LinkedHashMap<>());
                     for (String phrase : extractor.extractNounPhrases(comment)) {
-                        String cleaned = phrase == null ? "" : phrase.trim();
+                        String cleaned = phrase == null ? "" : phrase.trim().replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
                         if (cleaned.length() < 2) {
                             continue;
                         }
@@ -707,7 +708,7 @@ public final class JdbcReportService implements ReportService {
         for (Map.Entry<Integer, Map<String, Integer>> entry : phraseCounts.entrySet()) {
             String title = eventTitles.get(entry.getKey());
             entry.getValue().entrySet().stream()
-                    .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                    .sorted(Map.Entry.<String, Integer>comparingByValue().reversed().thenComparing(Map.Entry.comparingByKey()))
                     .limit(10)
                     .forEach(pe -> rows.add(List.of(title, pe.getKey(), String.valueOf(pe.getValue()))));
         }
@@ -724,8 +725,108 @@ public final class JdbcReportService implements ReportService {
     
 
     private static String normalizeMode(String raw, String defaultValue) {
-        String v = raw == null || raw.isBlank() ? defaultValue : raw.trim().toUpperCase().replace('-', '_');
+        String v = raw == null || raw.isBlank() ? defaultValue : raw.trim().toUpperCase(Locale.ROOT).replace('-', '_');
         return v;
+    }
+
+    private static void validateParameters(int report, List<String> p) {
+        switch (report) {
+            case 1 -> {
+                String mode = requireMode(arg(p, 0), "CITY", "CITY", "VENUE");
+                requireDateRange(arg(p, 1), arg(p, 2), false);
+                if (mode.equals("VENUE")) {
+                    if (arg(p, 3).isEmpty()) {
+                        throw new IllegalStateException("R1 venue mode requires a city.");
+                    }
+                    positiveInteger(arg(p, 4), "venueID", null);
+                }
+            }
+            case 2 -> requireMode(arg(p, 0), "COUNTRY", "COUNTRY", "CITY", "VENUE");
+            case 3 -> {
+                requireMode(arg(p, 0), "OVERALL", "OVERALL", "COUNTRY", "CITY");
+                requireDateRange(arg(p, 1), arg(p, 2), true);
+            }
+            case 4 -> positiveInteger(arg(p, 0), "window days", 365);
+            case 5 -> {
+                requireMode(arg(p, 0), "OVERALL", "OVERALL", "PER_CITY");
+                requireDateRange(arg(p, 1), arg(p, 2), false);
+            }
+            case 6 -> {
+                requireMode(arg(p, 0), "BOTH", "CUSTOMERS", "ORGANIZERS", "BOTH");
+                positiveInteger(arg(p, 1), "window days", 365);
+                positiveInteger(arg(p, 2), "limit", 10);
+            }
+            case 7 -> {
+                String mode = requireMode(arg(p, 0), "PERF", "PERF", "TIER", "MONTH");
+                if (mode.equals("MONTH")) {
+                    String value = arg(p, 1);
+                    try {
+                        if (!value.matches("\\d{4}-\\d{2}")) {
+                            throw new DateTimeParseException("Invalid month", value, 0);
+                        }
+                        YearMonth.parse(value);
+                    } catch (DateTimeParseException ex) {
+                        throw new IllegalStateException("Invalid month: use a real calendar month in YYYY-MM format.", ex);
+                    }
+                } else if (!arg(p, 1).isEmpty()) {
+                    positiveInteger(arg(p, 1), "performanceID", null);
+                }
+            }
+            case 8 -> {
+                String mode = requireMode(arg(p, 0), "STATS", "STATS", "TOP10");
+                if (mode.equals("TOP10")) {
+                    requireDateRange(arg(p, 1), arg(p, 2), false);
+                }
+            }
+            case 9 -> {
+                if (!arg(p, 0).isEmpty()) {
+                    positiveInteger(arg(p, 0), "eventID", null);
+                }
+            }
+            default -> throw new IllegalStateException("Unknown report number: " + report);
+        }
+    }
+
+    private static String requireMode(String raw, String defaultValue, String... allowed) {
+        String mode = normalizeMode(raw, defaultValue);
+        if (!List.of(allowed).contains(mode)) {
+            throw new IllegalStateException("Invalid report mode: " + raw);
+        }
+        return mode;
+    }
+
+    private static void requireDateRange(String from, String to, boolean optional) {
+        LocalDate first = reportDate(from, "dateFrom", optional);
+        LocalDate last = reportDate(to, "dateTo", optional);
+        if (first != null && last != null && first.isAfter(last)) {
+            throw new IllegalStateException("Invalid date range: dateFrom must not be after dateTo.");
+        }
+    }
+
+    private static LocalDate reportDate(String raw, String label, boolean optional) {
+        if (optional && raw.isEmpty()) {
+            return null;
+        }
+        try {
+            return LocalDate.parse(raw);
+        } catch (DateTimeParseException ex) {
+            throw new IllegalStateException("Invalid " + label + ": use a real calendar date in YYYY-MM-DD format.", ex);
+        }
+    }
+
+    private static int positiveInteger(String raw, String label, Integer defaultValue) {
+        if (raw.isBlank() && defaultValue != null) {
+            return defaultValue;
+        }
+        try {
+            int parsed = Integer.parseInt(raw);
+            if (parsed > 0) {
+                return parsed;
+            }
+        } catch (NumberFormatException ignored) {
+            // The same validation message covers non-integers and overflow.
+        }
+        throw new IllegalStateException("Invalid " + label + ": a positive integer is required.");
     }
 
     private static String arg(List<String> params, int idx) {
@@ -742,17 +843,10 @@ public final class JdbcReportService implements ReportService {
     }
 
     private static int parseIntOrDefault(String raw, int def) {
-        if (raw == null || raw.isBlank()) {
-            return def;
-        }
-        try {
-            return Integer.parseInt(raw.trim());
-        } catch (NumberFormatException e) {
-            return def;
-        }
+        return positiveInteger(raw == null ? "" : raw.trim(), "value", def);
     }
 
-    private static String pct(int numerator, int denominator) {
+    private static String pct(long numerator, long denominator) {
         if (denominator <= 0) {
             return "n/a";
         }
