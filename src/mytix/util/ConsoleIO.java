@@ -1,40 +1,82 @@
 package mytix.util;
 
 import java.util.List;
+import java.util.Arrays;
 import java.util.Scanner;
 
 public final class ConsoleIO {
 
     private final Scanner in;
+    private final java.io.Console console;
     private boolean eof;
 
     public ConsoleIO(Scanner in) {
+        this(in, null);
+    }
+
+    public ConsoleIO(Scanner in, java.io.Console console) {
         this.in = in;
+        this.console = console;
+    }
+
+    public static java.io.Console interactiveConsole() {
+        java.io.Console console = System.console();
+        if (console == null) {
+            return null;
+        }
+        try {
+            // JDK 22+ may return a Console even for pipes; keep those on the single Scanner reader.
+            return (Boolean) java.io.Console.class.getMethod("isTerminal").invoke(console) ? console : null;
+        } catch (NoSuchMethodException e) {
+            return console; // On JDK 17, a Console exists only for an interactive terminal.
+        } catch (ReflectiveOperationException e) {
+            return null;
+        }
     }
 
     public boolean reachedEof() {
         return eof;
     }
 
-    public String prompt(String label) {
-        System.out.print(label);
-        System.out.flush();
-        if (!in.hasNextLine()) {
-            eof = true;
-            return "";
+    /** Ends the active input workflow without substituting an empty value or a default. */
+    public static final class InputClosedException extends RuntimeException {
+        private InputClosedException() {
+            super("Input closed; incomplete command cancelled.");
         }
-        return in.nextLine().trim();
+    }
+
+    public static void rethrowIfInputClosed(RuntimeException exception) {
+        if (exception instanceof InputClosedException) {
+            throw exception;
+        }
+    }
+
+    public String prompt(String label) {
+        return readLine(label).trim();
+    }
+
+    private String readLine(String label) {
+        if (eof) {
+            throw new InputClosedException();
+        }
+        String value;
+        if (console != null) {
+            value = console.readLine("%s", label);
+        } else {
+            System.out.print(label);
+            System.out.flush();
+            value = in.hasNextLine() ? in.nextLine() : null;
+        }
+        if (value == null) {
+            eof = true;
+            throw new InputClosedException();
+        }
+        return value;
     }
 
     public String promptNonEmpty(String label) {
         while (true) {
-            if (eof) {
-                return "";
-            }
             String v = prompt(label);
-            if (eof) {
-                return "";
-            }
             if (!v.isEmpty()) {
                 return v;
             }
@@ -42,9 +84,36 @@ public final class ConsoleIO {
         }
     }
 
+    public String promptPassword(String label) {
+        while (true) {
+            if (eof) {
+                throw new InputClosedException();
+            }
+            String value;
+            if (console == null) {
+                value = readLine(label);
+            } else {
+                char[] chars = console.readPassword("%s", label);
+                if (chars == null) {
+                    eof = true;
+                    throw new InputClosedException();
+                }
+                try {
+                    value = new String(chars);
+                } finally {
+                    Arrays.fill(chars, '\0');
+                }
+            }
+            if (!value.isBlank() && value.length() <= PasswordUtil.MAX_PASSWORD_LENGTH) {
+                return value;
+            }
+            System.out.println("Password must contain 1 to 1024 characters and not be blank.");
+        }
+    }
+
     public int promptInt(String label, int defaultValue) {
         String raw = prompt(label + " [" + defaultValue + "]: ");
-        if (eof || raw.isEmpty()) {
+        if (raw.isEmpty()) {
             return defaultValue;
         }
         try {
@@ -66,17 +135,8 @@ public final class ConsoleIO {
         String defaultSuffix = blankUsesDefaultIndex >= 1 && blankUsesDefaultIndex <= labels.size()
                 ? " [" + blankUsesDefaultIndex + "]"
                 : "";
-        int fallback = blankUsesDefaultIndex >= 1 && blankUsesDefaultIndex <= labels.size()
-                ? blankUsesDefaultIndex - 1
-                : 0;
         while (true) {
-            if (eof) {
-                return values.get(fallback);
-            }
             String raw = prompt("Select 1-" + labels.size() + defaultSuffix + ": ");
-            if (eof) {
-                return values.get(fallback);
-            }
             if (raw.isEmpty() && blankUsesDefaultIndex >= 1 && blankUsesDefaultIndex <= labels.size()) {
                 return values.get(blankUsesDefaultIndex - 1);
             }
@@ -119,11 +179,8 @@ public final class ConsoleIO {
     public boolean confirmYesNo(String label, boolean defaultNo) {
         String hint = defaultNo ? "Y/N [N]" : "Y/N [Y]";
         while (true) {
-            if (eof) {
-                return !defaultNo;
-            }
             String raw = prompt(label + " (" + hint + "): ").trim();
-            if (eof || raw.isEmpty()) {
+            if (raw.isEmpty()) {
                 return !defaultNo;
             }
             if (raw.equalsIgnoreCase("Y") || raw.equalsIgnoreCase("YES")) {
@@ -137,9 +194,6 @@ public final class ConsoleIO {
     }
 
     public void pause() {
-        if (eof) {
-            return;
-        }
         prompt("Press Enter to continue...");
     }
 

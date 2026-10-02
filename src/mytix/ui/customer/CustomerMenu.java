@@ -55,10 +55,9 @@ public final class CustomerMenu extends AbstractMenu {
             session.logout();
         }
         String email = io.promptNonEmpty("Email: ");
-        String password = io.promptNonEmpty("Password: ");
+        String password = io.promptPassword("Password: ");
         if (!DatabaseLogistics.isConfigured()) {
-            System.out.println("Database offline — cannot authenticate. "
-                    + "Sample passwords for seeded users: password");
+            System.out.println("Database offline — cannot authenticate.");
             io.pause();
             return;
         }
@@ -72,6 +71,7 @@ public final class CustomerMenu extends AbstractMenu {
                 System.out.println("Logged in as " + session);
             }
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("Login error: " + e.getMessage());
         }
         io.pause();
@@ -227,6 +227,7 @@ public final class CustomerMenu extends AbstractMenu {
                     new BookRequest(customerID, performanceID, seatIDs, gaSectionID, gaQuantity));
             System.out.println("Booked! orderID = " + orderID);
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("Booking failed: " + e.getMessage());
         }
         io.pause();
@@ -257,6 +258,7 @@ public final class CustomerMenu extends AbstractMenu {
             boolean ok = ctx.booking().cancelTicket(customerID, ticketID);
             System.out.println(ok ? "Ticket cancelled." : "Cancel failed.");
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("Cancel failed: " + e.getMessage());
         }
         io.pause();
@@ -287,6 +289,7 @@ public final class CustomerMenu extends AbstractMenu {
                 }
             }
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("Error: " + e.getMessage());
         }
         io.pause();
@@ -317,6 +320,7 @@ public final class CustomerMenu extends AbstractMenu {
             int listingID = ctx.booking().listForResale(customerID, ticketID, askingPrice);
             System.out.println("Listed. listingID = " + listingID);
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("List for resale failed: " + e.getMessage());
         }
         io.pause();
@@ -342,6 +346,7 @@ public final class CustomerMenu extends AbstractMenu {
             boolean ok = ctx.booking().withdrawListing(customerID, listingID);
             System.out.println(ok ? "Listing withdrawn." : "Withdraw failed.");
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("Withdraw failed: " + e.getMessage());
         }
         io.pause();
@@ -367,6 +372,7 @@ public final class CustomerMenu extends AbstractMenu {
             int orderID = ctx.booking().buyResaleListing(customerID, listingID);
             System.out.println("Purchased! orderID = " + orderID);
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("Buy failed: " + e.getMessage());
         }
         io.pause();
@@ -399,6 +405,7 @@ public final class CustomerMenu extends AbstractMenu {
             ctx.booking().writeReview(customerID, performanceID, eventRating, venueRating, comment);
             System.out.println("Review submitted.");
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("Write review failed: " + e.getMessage());
         }
         io.pause();

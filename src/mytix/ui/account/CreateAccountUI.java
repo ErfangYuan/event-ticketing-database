@@ -41,12 +41,13 @@ public final class CreateAccountUI implements MenuAction {
         }
         String name = io.promptNonEmpty("Name: ");
         String email = io.promptNonEmpty("Email: ");
-        String password = io.promptNonEmpty("Password: ");
+        String password = io.promptPassword("Password: ");
         String address = io.promptNonEmpty("Address: ");
         LocalDate birthday;
         try {
             birthday = LocalDate.parse(io.promptNonEmpty("Birthday (YYYY-MM-DD): "));
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("Invalid date format.");
             io.pause();
             return;
@@ -70,6 +71,7 @@ public final class CreateAccountUI implements MenuAction {
                             List.of("name", name),
                             List.of("email", email)));
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("Create account failed: " + e.getMessage());
         }
         io.pause();

@@ -56,10 +56,9 @@ public final class OrganizerMenu extends AbstractMenu {
             session.logout();
         }
         String email = io.promptNonEmpty("Email: ");
-        String password = io.promptNonEmpty("Password: ");
+        String password = io.promptPassword("Password: ");
         if (!DatabaseLogistics.isConfigured()) {
-            System.out.println("Database offline — cannot authenticate. "
-                    + "Seeded organizers use password: password");
+            System.out.println("Database offline — cannot authenticate.");
             io.pause();
             return;
         }
@@ -73,6 +72,7 @@ public final class OrganizerMenu extends AbstractMenu {
                 System.out.println("Logged in as " + session);
             }
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("Login error: " + e.getMessage());
         }
         io.pause();
@@ -92,6 +92,7 @@ public final class OrganizerMenu extends AbstractMenu {
         try {
             r.run();
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("Error: " + e.getMessage());
             io.pause();
         }

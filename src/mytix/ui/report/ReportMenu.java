@@ -47,6 +47,7 @@ public final class ReportMenu extends AbstractMenu {
             try {
                 venues = ctx.catalog().listVenuesByCity(city);
             } catch (RuntimeException e) {
+                ConsoleIO.rethrowIfInputClosed(e);
                 System.out.println("Could not list venues: " + e.getMessage());
                 io.pause();
                 return;
@@ -159,6 +160,7 @@ public final class ReportMenu extends AbstractMenu {
             List<List<String>> rows = ctx.reports().runReport(reportNumber, params);
             Tabulator.printTable(title, headers, rows);
         } catch (RuntimeException e) {
+            ConsoleIO.rethrowIfInputClosed(e);
             System.out.println("Report failed: " + e.getMessage());
         }
         io.pause();

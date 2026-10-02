@@ -43,6 +43,8 @@ Run `./run.ps1` on Windows or `bash run.sh` on Linux/macOS. The launcher builds 
 
 R9 additionally needs four compatible English OpenNLP models. From the repository root, run `java scripts/InstallNlpModels.java` with JDK 17+ to download the pinned models into ignored `src/lib/opennlp/` and verify their SHA-256 checksums. Repeat the command to verify or repair the installation. See [model setup, sources, and licenses](docs/opennlp-models.md) for custom directories and offline preparation. Other searches and reports can run independently of the models.
 
+See [account security and input behavior](docs/account-security.md) for salted password storage, legacy-account migration, password whitespace, interrupted commands and account deletion.
+
 ## A short tour
 
 1. Start with Queries → Q6 and performance 1 to compare available, sold and blocked seats.

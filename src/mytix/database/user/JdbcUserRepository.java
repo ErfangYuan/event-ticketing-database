@@ -7,9 +7,11 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.Period;
+import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Locale;
 import mytix.database.DatabaseLogistics;
 import mytix.util.PasswordUtil;
 
@@ -19,12 +21,15 @@ public final class JdbcUserRepository implements UserRepository {
 
     @Override
     public Optional<UserRecord> findByEmail(String email) {
+        if (email == null || email.isBlank()) {
+            return Optional.empty();
+        }
         String sql =
                 "SELECT userID, email, passwordHash, name, address, birthday, userType, creditCardNumber "
                         + "FROM users WHERE email = ?";
         try (Connection c = DatabaseLogistics.getConnection();
                 PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, email);
+            ps.setString(1, normalizeEmail(email));
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
                     return Optional.empty();
@@ -49,12 +54,43 @@ public final class JdbcUserRepository implements UserRepository {
         if (expectedType != null && !expectedType.equalsIgnoreCase(u.userType())) {
             return Optional.empty();
         }
+        if (PasswordUtil.needsUpgrade(u.passwordHash())) {
+            String upgradedHash = PasswordUtil.hash(password);
+            try (Connection c = DatabaseLogistics.getConnection();
+                    PreparedStatement ps = c.prepareStatement(
+                            "UPDATE users SET passwordHash = ? WHERE userID = ? AND passwordHash = ?")) {
+                ps.setString(1, upgradedHash);
+                ps.setInt(2, u.userID());
+                ps.setString(3, u.passwordHash());
+                if (ps.executeUpdate() == 0) {
+                    // A concurrent login/reset/deletion won the compare-and-set: verify current credentials.
+                    Optional<UserRecord> current = findByEmail(email);
+                    return current.filter(record -> PasswordUtil.matches(record.passwordHash(), password)
+                            && (expectedType == null || expectedType.equalsIgnoreCase(record.userType())));
+                }
+                return Optional.of(new UserRecord(u.userID(), u.email(), upgradedHash, u.name(),
+                        u.address(), u.birthday(), u.userType(), u.creditCardNumber()));
+            } catch (SQLException e) {
+                throw new IllegalStateException("Authentication could not be completed.", e);
+            }
+        }
         return found;
     }
 
     @Override
     public int createAccount(CreateUserRequest request) {
-        String userType = request.userType().toUpperCase();
+        if (request == null) {
+            throw new IllegalArgumentException("Account details are required.");
+        }
+        requireText(request.email(), "Email", 255);
+        requireText(request.name(), "Name", 128);
+        requireText(request.address(), "Address", 255);
+        requireText(request.plainPassword(), "Password", PasswordUtil.MAX_PASSWORD_LENGTH);
+        requireText(request.userType(), "Account type", 16);
+        if (request.birthday() == null) {
+            throw new IllegalArgumentException("Birthday is required.");
+        }
+        String userType = request.userType().trim().toUpperCase(Locale.ROOT);
         if (!userType.equals("CUSTOMER") && !userType.equals("ORGANIZER")) {
             throw new IllegalArgumentException("userType must be CUSTOMER or ORGANIZER.");
         }
@@ -63,9 +99,19 @@ public final class JdbcUserRepository implements UserRepository {
             throw new IllegalArgumentException("Account holder must be at least " + MIN_AGE + " years old.");
         }
         boolean isCustomer = userType.equals("CUSTOMER");
-        if (isCustomer && (request.cardNumber() == null || request.cardNumber().isBlank())) {
-            throw new IllegalArgumentException("CUSTOMER accounts require a payment card.");
+        if (isCustomer) {
+            requireText(request.cardNumber(), "Payment card", 32);
+            requireText(request.cardExpiry(), "Card expiry", 7);
+            if (!request.cardExpiry().matches("[0-9]{4}-[0-9]{2}")) {
+                throw new IllegalArgumentException("Card expiry must use YYYY-MM.");
+            }
+            try {
+                YearMonth.parse(request.cardExpiry());
+            } catch (java.time.format.DateTimeParseException e) {
+                throw new IllegalArgumentException("Card expiry must use a valid YYYY-MM.");
+            }
         }
+        String passwordHash = PasswordUtil.hash(request.plainPassword());
 
         Connection c = null;
         try {
@@ -88,8 +134,8 @@ public final class JdbcUserRepository implements UserRepository {
                     "INSERT INTO users (email, passwordHash, name, address, birthday, userType, creditCardNumber) "
                             + "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     Statement.RETURN_GENERATED_KEYS)) {
-                ps.setString(1, request.email());
-                ps.setString(2, PasswordUtil.sha256Hex(request.plainPassword()));
+                ps.setString(1, normalizeEmail(request.email()));
+                ps.setString(2, passwordHash);
                 ps.setString(3, request.name());
                 ps.setString(4, request.address());
                 ps.setDate(5, java.sql.Date.valueOf(request.birthday()));
@@ -124,8 +170,9 @@ public final class JdbcUserRepository implements UserRepository {
 
     @Override
     public boolean deleteAccount(String email, String password) {
-        Optional<UserRecord> auth = authenticate(email, password, null);
-        if (auth.isEmpty()) {
+        // Deletion must not upgrade a hash before a later refusal/rollback.
+        Optional<UserRecord> auth = findByEmail(email);
+        if (auth.isEmpty() || !PasswordUtil.matches(auth.get().passwordHash(), password)) {
             return false;
         }
         UserRecord user = auth.get();
@@ -136,6 +183,17 @@ public final class JdbcUserRepository implements UserRepository {
         try {
             c = DatabaseLogistics.getConnection();
             DatabaseLogistics.begin(c);
+
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT passwordHash FROM users WHERE userID = ? FOR UPDATE")) {
+                ps.setInt(1, userID);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next() || !PasswordUtil.matches(rs.getString(1), password)) {
+                        DatabaseLogistics.rollbackQuietly(c);
+                        return false;
+                    }
+                }
+            }
 
             List<String> reasons = new ArrayList<>();
             if (existsWhere(c, "SELECT 1 FROM orders WHERE customerID = ?", userID)) {
@@ -169,6 +227,18 @@ public final class JdbcUserRepository implements UserRepository {
                 ps.executeUpdate();
             }
 
+            if (user.creditCardNumber() != null) {
+                try (PreparedStatement ps = c.prepareStatement(
+                        "DELETE FROM payment_cards WHERE cardNumber = ? "
+                                + "AND NOT EXISTS (SELECT 1 FROM users WHERE creditCardNumber = ?) "
+                                + "AND NOT EXISTS (SELECT 1 FROM orders WHERE cardNumber = ?)")) {
+                    ps.setString(1, user.creditCardNumber());
+                    ps.setString(2, user.creditCardNumber());
+                    ps.setString(3, user.creditCardNumber());
+                    ps.executeUpdate();
+                }
+            }
+
             DatabaseLogistics.commit(c);
             return true;
         } catch (SQLException e) {
@@ -179,6 +249,16 @@ public final class JdbcUserRepository implements UserRepository {
             throw e;
         } finally {
             closeQuietly(c);
+        }
+    }
+
+    private static String normalizeEmail(String email) {
+        return email.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static void requireText(String value, String name, int maxLength) {
+        if (value == null || value.isBlank() || value.length() > maxLength) {
+            throw new IllegalArgumentException(name + " is required and must contain at most " + maxLength + " characters.");
         }
     }
 
