@@ -1,8 +1,8 @@
-# Verification, 2026-10-02
+# Verification
 
 The database/TUI audit was rebuilt from the original requirements and public terminal entrypoints, then extended through the Java API and Next.js browser application. Previous seeds, screenshots and results were not acceptance oracles. Newly written tests, private requirements, credentials and detailed transcripts remain in ignored `local/` and are not distributed. These are observed local results, not a claim of automated CI coverage.
 
-## Database and terminal phase
+## Database and terminal phase, 2026-10-02
 
 The authorized local MySQL target was cleared before baseline testing. Small independently specified fixtures exposed query, reporting, account, inventory and history defects. Fixes were checked against exact result values and complete before/after logical database snapshots; temporary scenarios restored the fixture. Separate suites include the following (coverage overlaps; counts should not be added as distinct requirements):
 
@@ -50,3 +50,11 @@ The browser clear-all action emptied every table; each query/report form then di
 After contrast corrections, Lighthouse snapshot audits of the desktop and mobile overview each scored 100 for accessibility, best practices, SEO and agentic browsing (29 passed audits, zero failures). These are observations of those overview states, not a performance benchmark or an accessibility guarantee for every interaction. The schema graph was additionally checked visually and by entity/edge navigation.
 
 The Web environment used Node 24.15.0, Next.js 16.3.8, React 19.3.0, React Flow 12.12.0 and Jackson 2.22.3. Windows startup was executed end to end, including fresh dependency installation. Bash launchers passed syntax checks; Linux/macOS runtime execution was not performed. Authentication and payment behavior are local simulations. Concurrent application instances and external SQL/TUI writers are outside the single Java API maintenance gate.
+
+## Organizer event regression, 2026-10-07
+
+Issue #16 exposed a gap in the original Web acceptance: My events was checked after deleting the temporary organizer's event, so empty rows concealed an incorrect three-column declaration. The service returns event ID, event title, genre and organizer ID. The API now declares all four columns and retains its strict row-width validation.
+
+A focused read-only regression reproduced the failure for two existing organizers, then passed all 21 assertions after the fix: exact nonempty event/performance values and ordering, ignored forged actor IDs, anonymous/customer denial and full database immutability. Both empty organizer view contracts and all 26 existing API boundary assertions also passed. The original local integration suite now checks My events before deleting its fixture, as well as after deletion.
+
+Chrome/Playwright browser acceptance against the updated production preview at port 3000 clicked Organizer studio → My events → Run view and confirmed five records with four correctly labeled columns. My performances still displayed 15 records with six columns. Rendered values matched HTTP responses and no console errors occurred. Full snapshots confirmed all 22 tables unchanged across the entire regression and browser acceptance. New regression scripts, screenshots and evidence remain in ignored local/; no portfolio images or descriptions were changed.

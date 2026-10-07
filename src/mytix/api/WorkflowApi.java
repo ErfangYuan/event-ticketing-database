@@ -58,7 +58,7 @@ final class WorkflowApi {
             case "my-listings" -> table("listingID,ticketID,event,date,section,seat,listingPrice",catalog.listActiveListingsForSeller(role(a,"CUSTOMER").id()));
             case "reviewable" -> table("performanceID,event,venue,date",catalog.listEligibleReviewPerformances(role(a,"CUSTOMER").id()));
             case "my-performances" -> table("performanceID,event,venue,date,startTime,status",catalog.listMyPerformances(role(a,"ORGANIZER").id()));
-            case "my-events" -> table("eventID,event,genre",catalog.listEvents(role(a,"ORGANIZER").id()));
+            case "my-events" -> table("eventID,event,genre,organizerID",catalog.listEvents(role(a,"ORGANIZER").id()));
             case "tiers" -> table("tierID,tier,price,soldCount",catalog.listTiers(id(b,"performanceID")));
             case "blocked" -> table("seatID,section,seat,reason",catalog.listBlockedSeats(id(b,"performanceID")));
             default -> throw new Failure(404,"Unknown catalog view.");
